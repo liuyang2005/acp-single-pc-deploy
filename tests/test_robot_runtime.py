@@ -1,12 +1,85 @@
 from __future__ import annotations
 
 import time
+import threading
 from types import SimpleNamespace
 
 import numpy as np
 
 from acp_single_pc_deploy.robot.runner import RobotObservationRuntime
 from acp_single_pc_deploy.robot.sensors import resize_rgb_for_policy, write_rgb_png
+
+
+def _runtime(camera_factory, **overrides) -> RobotObservationRuntime:
+    settings = {
+        "hardware": None,
+        "camera_factory": camera_factory,
+        "buffer_capacity": 64,
+        "robot_state_hz": 1000.0,
+        "warmup_timeout_s": 1.0,
+        "max_age_s": {"rgb": 0.2, "pose": 0.05, "wrench": 0.05},
+    }
+    settings.update(overrides)
+    return RobotObservationRuntime(**settings)
+
+
+def test_camera_start_waits_for_first_buffered_frame() -> None:
+    read_started = threading.Event()
+    release_frame = threading.Event()
+
+    class Source:
+        def read(self):
+            read_started.set()
+            release_frame.wait(timeout=1.0)
+            return time.monotonic(), np.zeros((480, 640, 3), dtype=np.uint8)
+
+        def close(self):
+            release_frame.set()
+
+    runtime = _runtime(lambda: Source(), camera_start_timeout_s=1.0)
+    starter = threading.Thread(target=runtime.start)
+    starter.start()
+    assert read_started.wait(timeout=1.0)
+    assert starter.is_alive()
+
+    release_frame.set()
+    starter.join(timeout=1.0)
+    assert not starter.is_alive()
+    runtime.rgb_buffer.latest()
+    runtime.close()
+
+
+def test_camera_start_recreates_source_after_first_frame_failure() -> None:
+    attempts = 0
+
+    class Source:
+        def __init__(self, should_fail):
+            self.should_fail = should_fail
+
+        def read(self):
+            if self.should_fail:
+                raise RuntimeError("Frame didn't arrive")
+            return time.monotonic(), np.zeros((480, 640, 3), dtype=np.uint8)
+
+        def close(self):
+            return None
+
+    def factory():
+        nonlocal attempts
+        attempts += 1
+        return Source(should_fail=attempts == 1)
+
+    runtime = _runtime(
+        factory,
+        camera_start_attempts=2,
+        camera_retry_delay_s=0.0,
+        camera_start_timeout_s=1.0,
+    )
+    runtime.start()
+
+    assert attempts == 2
+    runtime.rgb_buffer.latest()
+    runtime.close()
 
 
 def test_wrist_rgb_is_center_cropped_to_policy_shape_without_channel_swap() -> None:

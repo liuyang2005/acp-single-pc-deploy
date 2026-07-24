@@ -35,6 +35,9 @@ def test_fixed_inference_and_robot_configs() -> None:
     assert robot["camera"]["dataset_name"] == "cam_260322274925_wrist"
     assert robot["camera"]["color_order"] == "RGB"
     assert robot["camera"]["frame_timeout_ms"] == 15000
+    assert robot["camera"]["start_attempts"] == 2
+    assert robot["camera"]["retry_delay_s"] == 1.0
+    assert robot["camera"]["start_timeout_s"] == 35.0
     assert robot["execution"]["execute_points"] == 12
     assert not any(key.lower() == "zeroftsensor" or "zero_ft" in key.lower() for key in _all_keys(robot))
 

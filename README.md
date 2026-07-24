@@ -65,7 +65,8 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available(), tor
 
 腕部相机采集 `640x480 BGR8`，读取后先转成 RGB，再按官方实机输入方式做
 等比例缩放和中心裁剪，最终交给 checkpoint 的尺寸是 `224x224 RGB`。
-首帧等待上限为 15 秒；超过该时间仍无彩色帧时进入 FAULT，不会无限等待。
+每次首帧等待上限为 15 秒；第一次失败会关闭并重建 RealSense pipeline，最多尝试
+两次，总启动上限为 35 秒。两次均失败时进入 FAULT，不会无限等待。
 
 ## 4. 必须先运行 dry-run
 
@@ -94,13 +95,13 @@ dry-run 的 `frames/` 中保存本次推理使用的腕部 RGB，不保存全帧
 也可用两个终端分别诊断：
 
 ```bash
-conda activate acp_deploy
+conda activate pyrite
 bash acp_single_pc_deploy/run_inference.sh \
-  "$HOME/acp_checkpoints/force30_torque15/latest.ckpt"
+  "$HOME/haptic_exo_teleop_ws/liuyang/acp_checkpoints/latest.ckpt"
 ```
 
 ```bash
-conda activate data_collect
+conda activate haptic_exo_env
 bash acp_single_pc_deploy/run_dry_run.sh
 ```
 

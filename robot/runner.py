@@ -51,6 +51,9 @@ class RobotObservationRuntime:
         robot_state_hz: float,
         warmup_timeout_s: float,
         max_age_s: dict[str, float],
+        camera_start_attempts: int = 2,
+        camera_retry_delay_s: float = 1.0,
+        camera_start_timeout_s: float = 35.0,
         policy_width: int = 224,
         policy_height: int = 224,
     ) -> None:
@@ -59,6 +62,15 @@ class RobotObservationRuntime:
         self.robot_period_s = 1.0 / float(robot_state_hz)
         self.warmup_timeout_s = float(warmup_timeout_s)
         self.max_age_s = max_age_s
+        self.camera_start_attempts = int(camera_start_attempts)
+        self.camera_retry_delay_s = float(camera_retry_delay_s)
+        self.camera_start_timeout_s = float(camera_start_timeout_s)
+        if self.camera_start_attempts <= 0:
+            raise ValueError("camera_start_attempts must be positive")
+        if self.camera_retry_delay_s < 0.0:
+            raise ValueError("camera_retry_delay_s must be nonnegative")
+        if self.camera_start_timeout_s <= 0.0:
+            raise ValueError("camera_start_timeout_s must be positive")
         self.policy_width = int(policy_width)
         self.policy_height = int(policy_height)
         self.rgb_buffer = TimedRingBuffer(buffer_capacity)
@@ -75,23 +87,48 @@ class RobotObservationRuntime:
             return
         self._thread = threading.Thread(target=self._camera_loop, name="wrist-rgb", daemon=True)
         self._thread.start()
-        if not self._started.wait(timeout=5.0):
-            raise RuntimeError("wrist camera did not start within 5 seconds")
+        if not self._started.wait(timeout=self.camera_start_timeout_s):
+            raise RuntimeError(
+                f"wrist camera did not deliver its first frame within "
+                f"{self.camera_start_timeout_s:g} seconds"
+            )
         self._raise_worker_error()
 
     def _camera_loop(self) -> None:
-        try:
-            self._source = self.camera_factory()
-            self._started.set()
-            while not self._stop.is_set():
+        for attempt in range(1, self.camera_start_attempts + 1):
+            source = None
+            try:
+                source = self.camera_factory()
+                self._source = source
                 timestamp, frame = self._source.read()
                 frame_224 = resize_rgb_for_policy(
                     frame, width=self.policy_width, height=self.policy_height
                 )
                 self.rgb_buffer.append(timestamp, frame_224)
-        except BaseException as exc:
-            self._worker_error = exc
-            self._started.set()
+                self._started.set()
+                while not self._stop.is_set():
+                    timestamp, frame = self._source.read()
+                    frame_224 = resize_rgb_for_policy(
+                        frame, width=self.policy_width, height=self.policy_height
+                    )
+                    self.rgb_buffer.append(timestamp, frame_224)
+                return
+            except BaseException as exc:
+                if source is not None:
+                    try:
+                        source.close()
+                    except Exception:
+                        pass
+                self._source = None
+                if self._stop.is_set():
+                    return
+                if attempt < self.camera_start_attempts:
+                    if self._stop.wait(self.camera_retry_delay_s):
+                        return
+                    continue
+                self._worker_error = exc
+                self._started.set()
+                return
 
     def _raise_worker_error(self) -> None:
         if self._worker_error is not None:
@@ -502,6 +539,9 @@ def main(argv: list[str] | None = None) -> int:
             buffer_capacity=int(acquisition["buffer_capacity"]),
             robot_state_hz=float(acquisition["robot_state_hz"]),
             warmup_timeout_s=float(acquisition["warmup_timeout_s"]),
+            camera_start_attempts=int(camera["start_attempts"]),
+            camera_retry_delay_s=float(camera["retry_delay_s"]),
+            camera_start_timeout_s=float(camera["start_timeout_s"]),
             max_age_s={
                 "rgb": limits.max_rgb_age_s,
                 "pose": limits.max_pose_age_s,
