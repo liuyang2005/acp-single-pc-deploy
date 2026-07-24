@@ -228,9 +228,12 @@ class Runner:
         self.event_sink = event_sink or (lambda _event: None)
         self.stop_reason = "not_started"
         self.completed_steps = 0
+        self.completed_chunks = 0
         self.handshake_metadata: dict[str, Any] = {}
         self._baseline = np.zeros(6, dtype=np.float64)
         self._closed = False
+        self._continuous_started_s: float | None = None
+        self._continuous_deadline_s: float | None = None
 
     @classmethod
     def for_test(
@@ -317,21 +320,49 @@ class Runner:
             latest_age_s=packet.latest_age_s,
         )
 
-    def _execute(self, chunk: Any) -> None:
+    def _infer_action(self, request_id: int) -> Any:
+        packet = self.observe(request_id)
+        self._guard_observation(packet)
+        chunk = self.client.infer(packet)
+        self._emit(
+            "action_chunk",
+            request_id=chunk.request_id,
+            reference_pose7=chunk.reference_pose7,
+            virtual_pose7=chunk.virtual_pose7,
+            stiffness=chunk.stiffness,
+            action_period_s=chunk.action_period_s,
+            inference_latency_s=chunk.inference_latency_s,
+        )
+        return chunk
+
+    def _latch_chunk_pose(self, pose7: np.ndarray) -> None:
+        if self.mode in {"continuous-dry-run", "continuous"}:
+            self.safety.latch_cycle_pose(pose7)
+        else:
+            self.safety.latch_start_pose(pose7)
+
+    def _execute(
+        self,
+        chunk: Any,
+        execute_points: int | None = None,
+        deadline_s: float | None = None,
+    ) -> bool:
         state = self.hardware.read_state()
         self._validate_robot_state(state)
-        self.safety.latch_start_pose(state.pose7)
+        self._latch_chunk_pose(state.pose7)
+        point_count = self.settings.execute_points if execute_points is None else execute_points
         executor = ActionChunkExecutor(
             chunk=chunk,
             start_time_s=self.clock(),
-            execute_points=self.settings.execute_points,
+            execute_points=point_count,
             inner_stiffness=self.safety.limits.inner_translation_stiffness_n_m,
         )
-        self._transition(DeploymentState.RUNNING, "policy motion confirmed")
         while True:
             now = self.clock()
+            if deadline_s is not None and now >= deadline_s:
+                return False
             if executor.expired(now):
-                break
+                return True
             state = self.hardware.read_state()
             self._validate_robot_state(state)
             reading = WrenchReading.from_raw(state.raw_wrench_tcp, self._baseline)
@@ -353,23 +384,32 @@ class Runner:
             )
             self.sleep(self.settings.control_period_s)
 
-    def _preview(self, chunk: Any) -> None:
+    def _preview(
+        self,
+        chunk: Any,
+        execute_points: int | None = None,
+        deadline_s: float | None = None,
+    ) -> bool:
         state = self.hardware.read_state()
         self._validate_robot_state(state)
         reading = WrenchReading.from_raw(state.raw_wrench_tcp, self._baseline)
         self.safety.validate_wrench(reading)
-        self.safety.latch_start_pose(state.pose7)
+        self._latch_chunk_pose(state.pose7)
+        point_count = self.settings.execute_points if execute_points is None else execute_points
         start_time = self.clock()
         executor = ActionChunkExecutor(
             chunk=chunk,
             start_time_s=start_time,
-            execute_points=self.settings.execute_points,
+            execute_points=point_count,
             inner_stiffness=self.safety.limits.inner_translation_stiffness_n_m,
         )
         preview_pose = np.asarray(state.pose7, dtype=np.float64).copy()
         translation_limit_count = 0
         rotation_limit_count = 0
-        for point in range(self.settings.execute_points):
+        completed_points = 0
+        for point in range(point_count):
+            if deadline_s is not None and self.clock() >= deadline_s:
+                return False
             preview_time = start_time + point * chunk.action_period_s
             command = executor.command_at(preview_time, preview_pose, self.safety)
             messages = set(command.safety_messages)
@@ -388,14 +428,93 @@ class Runner:
             if "stiffness_clipped" in messages:
                 self.safety.fault(f"dry-run stiffness clipped at preview point {point}")
             preview_pose = command.applied_pose7
+            completed_points += 1
         self._emit(
             "action_preview",
             request_id=chunk.request_id,
-            point_count=self.settings.execute_points,
+            point_count=completed_points,
             stiffness_clip_count=0,
             translation_limit_count=translation_limit_count,
             rotation_limit_count=rotation_limit_count,
         )
+        return True
+
+    def _begin_continuous(self) -> None:
+        self._continuous_started_s = self.clock()
+        self._continuous_deadline_s = (
+            self._continuous_started_s + self.settings.max_continuous_runtime_s
+        )
+        self._emit(
+            "continuous_start",
+            max_runtime_s=self.settings.max_continuous_runtime_s,
+            execute_points=self.settings.continuous_execute_points,
+        )
+
+    def _run_continuous(self, first_chunk: Any) -> int:
+        assert self._continuous_started_s is not None
+        assert self._continuous_deadline_s is not None
+        started_s = self._continuous_started_s
+        deadline_s = self._continuous_deadline_s
+        request_id = first_chunk.request_id
+        chunk = first_chunk
+        self._transition(DeploymentState.RUNNING, "continuous policy loop started")
+        while self.clock() < deadline_s:
+            self._emit(
+                "chunk_start",
+                request_id=request_id,
+                chunk_index=self.completed_chunks,
+                cumulative_runtime_s=self.clock() - started_s,
+            )
+            for point in range(self.settings.continuous_execute_points):
+                self._emit(
+                    "action_selected_point",
+                    request_id=request_id,
+                    point=point,
+                    reference_pose7=chunk.reference_pose7[point],
+                    virtual_pose7=chunk.virtual_pose7[point],
+                    stiffness=chunk.stiffness[point],
+                )
+            if self.mode == "continuous-dry-run":
+                completed = self._preview(
+                    chunk,
+                    execute_points=self.settings.continuous_execute_points,
+                    deadline_s=deadline_s,
+                )
+                command_count = 0
+            else:
+                before = self.completed_steps
+                completed = self._execute(
+                    chunk,
+                    execute_points=self.settings.continuous_execute_points,
+                    deadline_s=deadline_s,
+                )
+                command_count = self.completed_steps - before
+            if not completed:
+                break
+            self.completed_chunks += 1
+            self._emit(
+                "chunk_complete",
+                request_id=request_id,
+                chunk_index=self.completed_chunks - 1,
+                selected_point_count=self.settings.continuous_execute_points,
+                command_count=command_count,
+                inference_latency_s=chunk.inference_latency_s,
+                cumulative_runtime_s=self.clock() - started_s,
+            )
+            request_id += 1
+            if self.clock() >= deadline_s:
+                break
+            chunk = self._infer_action(request_id)
+        self.stop_reason = "runtime_limit_reached"
+        self._emit(
+            "continuous_stop",
+            stop_reason=self.stop_reason,
+            completed_chunks=self.completed_chunks,
+            completed_command_steps=self.completed_steps,
+            cumulative_runtime_s=self.clock() - started_s,
+        )
+        self._transition(DeploymentState.HOLD, self.stop_reason)
+        return 0
 
     def run_once(self) -> int:
         result = 1
@@ -422,18 +541,13 @@ class Runner:
             self.handshake_metadata = dict(handshake)
             self._emit("inference_handshake", response=handshake)
 
-            packet = self.observe(0)
-            self._guard_observation(packet)
-            chunk = self.client.infer(packet)
-            self._emit(
-                "action_chunk",
-                request_id=chunk.request_id,
-                reference_pose7=chunk.reference_pose7,
-                virtual_pose7=chunk.virtual_pose7,
-                stiffness=chunk.stiffness,
-                action_period_s=chunk.action_period_s,
-                inference_latency_s=chunk.inference_latency_s,
-            )
+            if self.mode == "continuous-dry-run":
+                self._begin_continuous()
+                chunk = self._infer_action(0)
+                self._transition(DeploymentState.ARMED, "first valid action received")
+                return self._run_continuous(chunk)
+
+            chunk = self._infer_action(0)
             self._transition(DeploymentState.ARMED, "first valid action received")
 
             if self.mode == "dry-run":
@@ -441,13 +555,19 @@ class Runner:
                 self.stop_reason = "dry_run_complete"
                 self._transition(DeploymentState.HOLD, self.stop_reason)
                 return 0
-            if not self.confirm(
-                "输入完整机器人序列号并再次确认，允许执行一个 ACP action chunk: "
-            ):
+            execution_name = (
+                "连续 ACP 闭环运动" if self.mode == "continuous" else "一个 ACP action chunk"
+            )
+            if not self.confirm(f"输入完整机器人序列号并再次确认，允许执行{execution_name}: "):
                 self.stop_reason = "policy_confirmation_rejected"
                 self._transition(DeploymentState.HOLD, self.stop_reason)
                 return 2
 
+            if self.mode == "continuous":
+                self._begin_continuous()
+                return self._run_continuous(chunk)
+
+            self._transition(DeploymentState.RUNNING, "policy motion confirmed")
             self._execute(chunk)
             self.stop_reason = "one_chunk_complete"
             self._transition(DeploymentState.HOLD, self.stop_reason)

@@ -15,7 +15,7 @@ class FakeHardware:
         self.home_calls: list[np.ndarray] = []
         self.policy_pose_commands: list[np.ndarray] = []
         self.stopped = False
-        self.pose7 = np.array([0, 0, 0, 1, 0, 0, 0], dtype=np.float64)
+        self.pose7 = np.array([0.70, 0.00, 0.20, 1, 0, 0, 0], dtype=np.float64)
         self.raw_wrench = np.zeros(6, dtype=np.float64)
 
     def home(self, joints_deg, timeout_s, epsilon_deg):
@@ -60,6 +60,8 @@ class FakeClient:
     def infer(self, packet: ObservationPacket):
         self.inferred_packets.append(packet)
         chunk = make_action(request_id=packet.request_id)
+        chunk.reference_pose7[:] = packet.pose7[-1]
+        chunk.virtual_pose7[:] = packet.pose7[-1]
         chunk.action_period_s = 0.001
         return chunk
 
@@ -74,13 +76,16 @@ class FakeComponents:
     client: FakeClient = field(default_factory=FakeClient)
     confirmations: list[bool] = field(default_factory=lambda: [True, True])
     events: list[dict[str, object]] = field(default_factory=list)
+    observed_request_ids: list[int] = field(default_factory=list)
     now_s: float = 0.0
 
     def confirm(self, _prompt: str) -> bool:
         return self.confirmations.pop(0)
 
     def observe(self, request_id: int) -> ObservationPacket:
+        self.observed_request_ids.append(request_id)
         packet = make_observation(request_id=request_id)
+        packet.pose7[:] = self.hardware.pose7
         packet.wrench[:] = self.hardware.raw_wrench
         return packet
 

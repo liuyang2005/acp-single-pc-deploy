@@ -3,8 +3,20 @@ from __future__ import annotations
 import numpy as np
 
 from acp_single_pc_deploy.robot.hardware import HOME_JOINTS_DEG
-from acp_single_pc_deploy.robot.runner import Runner
+from acp_single_pc_deploy.robot.runner import Runner, RunnerSettings
 from acp_single_pc_deploy.robot.safety import DeploymentState
+
+
+def continuous_settings(**overrides) -> RunnerSettings:
+    values = {
+        "baseline_duration_s": 0.0,
+        "baseline_sample_period_s": 0.0,
+        "control_period_s": 0.001,
+        "continuous_execute_points": 4,
+        "max_continuous_runtime_s": 0.03,
+    }
+    values.update(overrides)
+    return RunnerSettings(**values)
 
 
 def test_dry_run_homes_and_infers_without_policy_pose(fake_components) -> None:
@@ -88,3 +100,36 @@ def test_shutdown_stops_every_owned_resource(fake_components) -> None:
     assert fake_components.camera.closed
     assert fake_components.client.closed
     assert fake_components.hardware.stopped
+
+
+def test_continuous_executes_four_points_then_reobserves(fake_components) -> None:
+    runner = Runner.for_test(
+        "continuous",
+        fake_components,
+        settings=continuous_settings(max_continuous_runtime_s=0.04),
+    )
+
+    assert runner.run_once() == 0
+    assert fake_components.observed_request_ids == list(
+        range(len(fake_components.observed_request_ids))
+    )
+    assert len(fake_components.observed_request_ids) >= 2
+    complete = [e for e in fake_components.events if e["type"] == "chunk_complete"]
+    assert all(e["selected_point_count"] == 4 for e in complete)
+    starts = [e for e in fake_components.events if e["type"] == "chunk_start"]
+    selected = [
+        e for e in fake_components.events if e["type"] == "action_selected_point"
+    ]
+    assert len(selected) == 4 * len(starts)
+    assert runner.completed_chunks == len(complete)
+
+
+def test_continuous_dry_run_repeats_without_sending_pose(fake_components) -> None:
+    runner = Runner.for_test(
+        "continuous-dry-run", fake_components, settings=continuous_settings()
+    )
+
+    assert runner.run_once() == 0
+    assert len(fake_components.observed_request_ids) >= 2
+    assert fake_components.hardware.policy_pose_commands == []
+    assert runner.stop_reason == "runtime_limit_reached"
