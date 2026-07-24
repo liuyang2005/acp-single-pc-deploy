@@ -109,6 +109,8 @@ def test_launcher_uses_fixed_checkpoint_and_conda_environments() -> None:
     assert '[[ ! -f "${CHECKPOINT_PATH}" ]]' in combined_script
     assert "conda run" in combined_script
     assert "--health" in combined_script
+    assert 'setsid conda run --no-capture-output -n "${ACP_ENV}"' in combined_script
+    assert 'kill -- "-${INFERENCE_PID}"' in combined_script
     for mode in ("continuous_dry_run", "continuous"):
         assert (ROOT / f"run_{mode}.sh").is_file()
     assert "--mode continuous-dry-run" in (

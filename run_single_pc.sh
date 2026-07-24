@@ -26,15 +26,15 @@ ENDPOINT="tcp://127.0.0.1:5555"
 INFERENCE_PID=""
 
 cleanup() {
-  if [[ -n "${INFERENCE_PID}" ]] && kill -0 "${INFERENCE_PID}" 2>/dev/null; then
-    kill "${INFERENCE_PID}" 2>/dev/null || true
+  if [[ -n "${INFERENCE_PID}" ]] && kill -0 -- "-${INFERENCE_PID}" 2>/dev/null; then
+    kill -- "-${INFERENCE_PID}" 2>/dev/null || true
     wait "${INFERENCE_PID}" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT INT TERM
 
 cd "${ROOT_DIR}"
-conda run --no-capture-output -n "${ACP_ENV}" \
+setsid conda run --no-capture-output -n "${ACP_ENV}" \
   bash "${INFERENCE_SCRIPT}" "${CHECKPOINT_PATH}" &
 INFERENCE_PID=$!
 
