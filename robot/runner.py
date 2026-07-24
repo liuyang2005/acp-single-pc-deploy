@@ -224,6 +224,7 @@ class Runner:
                 baseline_sample_period_s=0.0,
                 control_period_s=0.001,
             ),
+            event_sink=components.events.append,
         )
 
     def _emit(self, event_type: str, **fields: Any) -> None:
@@ -327,15 +328,35 @@ class Runner:
             execute_points=self.settings.execute_points,
             inner_stiffness=self.safety.limits.inner_translation_stiffness_n_m,
         )
-        command = executor.command_at(start_time, state.pose7, self.safety)
+        preview_pose = np.asarray(state.pose7, dtype=np.float64).copy()
+        translation_limit_count = 0
+        rotation_limit_count = 0
+        for point in range(self.settings.execute_points):
+            preview_time = start_time + point * chunk.action_period_s
+            command = executor.command_at(preview_time, preview_pose, self.safety)
+            messages = set(command.safety_messages)
+            translation_limit_count += int("translation_step" in messages)
+            rotation_limit_count += int("rotation_step" in messages)
+            self._emit(
+                "action_preview_point",
+                request_id=chunk.request_id,
+                point=point,
+                predicted_stiffness=command.predicted_stiffness,
+                applied_stiffness=command.applied_stiffness,
+                equivalent_pose7=command.equivalent_pose7,
+                limited_pose7=command.applied_pose7,
+                safety_messages=command.safety_messages,
+            )
+            if "stiffness_clipped" in messages:
+                self.safety.fault(f"dry-run stiffness clipped at preview point {point}")
+            preview_pose = command.applied_pose7
         self._emit(
             "action_preview",
             request_id=chunk.request_id,
-            predicted_stiffness=command.predicted_stiffness,
-            applied_stiffness=command.applied_stiffness,
-            equivalent_pose7=command.equivalent_pose7,
-            limited_pose7=command.applied_pose7,
-            safety_messages=command.safety_messages,
+            point_count=self.settings.execute_points,
+            stiffness_clip_count=0,
+            translation_limit_count=translation_limit_count,
+            rotation_limit_count=rotation_limit_count,
         )
 
     def run_once(self) -> int:

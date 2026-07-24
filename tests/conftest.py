@@ -73,6 +73,7 @@ class FakeComponents:
     camera: FakeCamera = field(default_factory=FakeCamera)
     client: FakeClient = field(default_factory=FakeClient)
     confirmations: list[bool] = field(default_factory=lambda: [True, True])
+    events: list[dict[str, object]] = field(default_factory=list)
     now_s: float = 0.0
 
     def confirm(self, _prompt: str) -> bool:

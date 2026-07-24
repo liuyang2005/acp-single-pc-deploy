@@ -16,6 +16,37 @@ def test_dry_run_homes_and_infers_without_policy_pose(fake_components) -> None:
     assert runner.safety.state is DeploymentState.HOLD
 
 
+def test_dry_run_previews_every_execution_point(fake_components) -> None:
+    runner = Runner.for_test("dry-run", fake_components)
+
+    assert runner.run_once() == 0
+
+    points = [
+        event
+        for event in fake_components.events
+        if event["type"] == "action_preview_point"
+    ]
+    assert len(points) == runner.settings.execute_points == 12
+    assert [event["point"] for event in points] == list(range(12))
+    assert fake_components.hardware.policy_pose_commands == []
+
+
+def test_dry_run_fails_when_any_stiffness_is_clipped(fake_components) -> None:
+    original_infer = fake_components.client.infer
+
+    def clipped_infer(packet):
+        chunk = original_infer(packet)
+        chunk.stiffness[5] = 5001.0
+        return chunk
+
+    fake_components.client.infer = clipped_infer
+    runner = Runner.for_test("dry-run", fake_components)
+
+    assert runner.run_once() == 1
+    assert runner.safety.state is DeploymentState.FAULT
+    assert fake_components.hardware.policy_pose_commands == []
+
+
 def test_dry_run_safety_previews_model_action_without_sending(fake_components) -> None:
     original_infer = fake_components.client.infer
 
