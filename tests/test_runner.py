@@ -101,6 +101,8 @@ def test_shutdown_stops_every_owned_resource(fake_components) -> None:
     assert fake_components.camera.closed
     assert fake_components.client.closed
     assert fake_components.hardware.stopped
+    shutdown = [e for e in fake_components.events if e["type"] == "shutdown"]
+    assert shutdown[0]["completed_chunks"] == runner.completed_chunks
 
 
 def test_continuous_executes_four_points_then_reobserves(fake_components) -> None:

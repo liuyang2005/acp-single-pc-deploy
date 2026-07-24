@@ -5,8 +5,13 @@ import threading
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
-from acp_single_pc_deploy.robot.runner import RobotObservationRuntime
+from acp_single_pc_deploy.robot.runner import (
+    RobotObservationRuntime,
+    should_save_request_frame,
+    timing_header,
+)
 from acp_single_pc_deploy.robot.sensors import resize_rgb_for_policy, write_rgb_png
 
 
@@ -21,6 +26,31 @@ def _runtime(camera_factory, **overrides) -> RobotObservationRuntime:
     }
     settings.update(overrides)
     return RobotObservationRuntime(**settings)
+
+
+@pytest.mark.parametrize(
+    "mode,expected",
+    [
+        ("dry-run", True),
+        ("execute", False),
+        ("continuous-dry-run", True),
+        ("continuous", True),
+    ],
+)
+def test_mode_saves_request_frames(mode, expected) -> None:
+    assert should_save_request_frame(mode) is expected
+
+
+def test_continuous_timing_header_is_stable() -> None:
+    assert timing_header() == [
+        "request_id",
+        "chunk_index",
+        "inference_latency_s",
+        "action_period_s",
+        "selected_point_count",
+        "command_count",
+        "cumulative_runtime_s",
+    ]
 
 
 def test_camera_start_waits_for_first_buffered_frame() -> None:

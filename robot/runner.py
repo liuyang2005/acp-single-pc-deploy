@@ -59,6 +59,22 @@ class RunnerSettings:
 MODES = ("dry-run", "execute", "continuous-dry-run", "continuous")
 
 
+def should_save_request_frame(mode: str) -> bool:
+    return mode in {"dry-run", "continuous-dry-run", "continuous"}
+
+
+def timing_header() -> list[str]:
+    return [
+        "request_id",
+        "chunk_index",
+        "inference_latency_s",
+        "action_period_s",
+        "selected_point_count",
+        "command_count",
+        "cumulative_runtime_s",
+    ]
+
+
 class RobotObservationRuntime:
     def __init__(
         self,
@@ -512,6 +528,7 @@ class Runner:
                 selected_point_count=self.settings.continuous_execute_points,
                 command_count=command_count,
                 inference_latency_s=chunk.inference_latency_s,
+                action_period_s=chunk.action_period_s,
                 cumulative_runtime_s=self.clock() - started_s,
             )
             request_id += 1
@@ -623,6 +640,7 @@ class Runner:
             "shutdown",
             stop_reason=self.stop_reason,
             completed_steps=self.completed_steps,
+            completed_chunks=self.completed_chunks,
             cleanup_errors=errors,
         )
 
@@ -729,9 +747,7 @@ def main(argv: list[str] | None = None) -> int:
     events = JsonlWriter(run_dir / "events.jsonl")
     timing_path = run_dir / "timing.csv"
     with timing_path.open("x", encoding="utf-8", newline="") as stream:
-        csv.writer(stream).writerow(
-            ["request_id", "inference_latency_s", "action_period_s", "completed_command_steps"]
-        )
+        csv.writer(stream).writerow(timing_header())
     metadata_path = run_dir / "metadata.json"
     started_metadata = {
         "mode": args.mode,
@@ -796,22 +812,36 @@ def main(argv: list[str] | None = None) -> int:
 
         def observe(request_id: int) -> ObservationPacket:
             packet = runtime.observe(request_id)
-            if args.mode == "dry-run":
+            if should_save_request_frame(args.mode):
                 write_rgb_png(frames_dir / f"request_{request_id:06d}.png", packet.rgb[-1])
             return packet
 
         def event_sink(event: dict[str, Any]) -> None:
             events.write(event)
-            if event.get("type") == "action_chunk":
+            row: list[Any] | None = None
+            if event.get("type") == "chunk_complete":
+                row = [
+                    event.get("request_id"),
+                    event.get("chunk_index"),
+                    event.get("inference_latency_s"),
+                    event.get("action_period_s"),
+                    event.get("selected_point_count"),
+                    event.get("command_count"),
+                    event.get("cumulative_runtime_s"),
+                ]
+            elif event.get("type") == "action_chunk" and args.mode in {"dry-run", "execute"}:
+                row = [
+                    event.get("request_id"),
+                    "",
+                    event.get("inference_latency_s"),
+                    event.get("action_period_s"),
+                    settings.execute_points,
+                    "",
+                    "",
+                ]
+            if row is not None:
                 with timing_path.open("a", encoding="utf-8", newline="") as stream:
-                    csv.writer(stream).writerow(
-                        [
-                            event.get("request_id"),
-                            event.get("inference_latency_s"),
-                            event.get("action_period_s"),
-                            "",
-                        ]
-                    )
+                    csv.writer(stream).writerow(row)
 
         runner = Runner(
             mode=args.mode,
@@ -836,6 +866,7 @@ def main(argv: list[str] | None = None) -> int:
             "return_code": result,
             "stop_reason": runner.stop_reason if runner is not None else "startup_failed",
             "completed_command_steps": runner.completed_steps if runner is not None else 0,
+            "completed_chunks": runner.completed_chunks if runner is not None else 0,
             "wrench_baseline": runner._baseline if runner is not None else None,
             "inference_handshake": runner.handshake_metadata if runner is not None else None,
         }
