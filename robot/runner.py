@@ -88,7 +88,7 @@ class RobotObservationRuntime:
                 frame_224 = resize_rgb_for_policy(
                     frame, width=self.policy_width, height=self.policy_height
                 )
-                self.rgb_buffer.push(timestamp, frame_224)
+                self.rgb_buffer.append(timestamp, frame_224)
         except BaseException as exc:
             self._worker_error = exc
             self._started.set()
@@ -108,8 +108,8 @@ class RobotObservationRuntime:
             state = self.hardware.read_state()
             if state.fault or not state.operational:
                 raise SafetyFault("robot became faulted or non-operational during observation warmup")
-            self.pose_buffer.push(state.timestamp_s, state.pose7)
-            self.wrench_buffer.push(state.timestamp_s, state.raw_wrench_tcp)
+            self.pose_buffer.append(state.timestamp_s, state.pose7)
+            self.wrench_buffer.append(state.timestamp_s, state.raw_wrench_tcp)
             now = time.monotonic()
             try:
                 return build_observation(

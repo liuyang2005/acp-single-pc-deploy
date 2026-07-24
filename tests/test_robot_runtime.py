@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import time
+from types import SimpleNamespace
+
 import numpy as np
 
+from acp_single_pc_deploy.robot.runner import RobotObservationRuntime
 from acp_single_pc_deploy.robot.sensors import resize_rgb_for_policy, write_rgb_png
 
 
@@ -27,3 +31,37 @@ def test_dry_run_png_preserves_rgb_color_order(tmp_path) -> None:
     write_rgb_png(path, image)
     loaded_bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
     assert np.all(loaded_bgr[0, 0] == [0, 0, 255])
+
+
+def test_observation_runtime_appends_pose_and_wrench_histories() -> None:
+    class Hardware:
+        def read_state(self):
+            return SimpleNamespace(
+                timestamp_s=time.monotonic(),
+                pose7=np.array([0, 0, 0, 1, 0, 0, 0], dtype=np.float64),
+                raw_wrench_tcp=np.zeros(6, dtype=np.float64),
+                fault=False,
+                operational=True,
+            )
+
+    runtime = RobotObservationRuntime(
+        hardware=Hardware(),
+        camera_factory=lambda: None,
+        buffer_capacity=64,
+        robot_state_hz=1000.0,
+        warmup_timeout_s=1.0,
+        max_age_s={"rgb": 0.2, "pose": 0.05, "wrench": 0.05},
+    )
+    runtime._thread = object()
+    latest = time.monotonic()
+    for index in range(11):
+        runtime.rgb_buffer.append(
+            latest - (10 - index) * 0.01,
+            np.zeros((224, 224, 3), dtype=np.uint8),
+        )
+
+    packet = runtime.observe(request_id=3)
+
+    assert packet.request_id == 3
+    assert packet.pose7.shape == (3, 7)
+    assert packet.wrench.shape == (32, 6)
