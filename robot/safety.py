@@ -162,7 +162,8 @@ class SafetySupervisor:
         if not np.isfinite(stiffness) or stiffness <= 0.0:
             self.fault("predicted stiffness must be finite and positive")
         applied = float(np.clip(stiffness, self.limits.stiffness_min_n_m, self.limits.stiffness_max_n_m))
-        return applied, applied != float(stiffness)
+        clipped = not np.isclose(applied, stiffness, rtol=0.0, atol=1e-3)
+        return applied, bool(clipped)
 
     def limit_pose(self, requested_pose7: np.ndarray, current_pose7: np.ndarray) -> np.ndarray:
         requested = self._validated_pose(requested_pose7)

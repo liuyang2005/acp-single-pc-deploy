@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -58,3 +60,11 @@ def test_stiffness_is_clipped_and_nonfinite_faults() -> None:
     assert supervisor.validate_stiffness(1500.0) == (1000.0, True)
     with pytest.raises(SafetyFault, match="stiffness"):
         supervisor.validate_stiffness(float("nan"))
+
+
+def test_float32_boundary_noise_is_not_reported_as_stiffness_clipping() -> None:
+    limits = replace(SafetyLimits.defaults(), stiffness_max_n_m=5000.0)
+    supervisor = SafetySupervisor(limits)
+
+    assert supervisor.validate_stiffness(5000.00048828125) == (5000.0, False)
+    assert supervisor.validate_stiffness(5000.01) == (5000.0, True)
