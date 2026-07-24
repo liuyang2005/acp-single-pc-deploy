@@ -234,6 +234,7 @@ class Runner:
         self._closed = False
         self._continuous_started_s: float | None = None
         self._continuous_deadline_s: float | None = None
+        self._continuous_stop_emitted = False
 
     @classmethod
     def for_test(
@@ -450,6 +451,18 @@ class Runner:
             execute_points=self.settings.continuous_execute_points,
         )
 
+    def _emit_continuous_stop(self) -> None:
+        if self._continuous_started_s is None or self._continuous_stop_emitted:
+            return
+        self._continuous_stop_emitted = True
+        self._emit(
+            "continuous_stop",
+            stop_reason=self.stop_reason,
+            completed_chunks=self.completed_chunks,
+            completed_command_steps=self.completed_steps,
+            cumulative_runtime_s=self.clock() - self._continuous_started_s,
+        )
+
     def _run_continuous(self, first_chunk: Any) -> int:
         assert self._continuous_started_s is not None
         assert self._continuous_deadline_s is not None
@@ -506,13 +519,7 @@ class Runner:
                 break
             chunk = self._infer_action(request_id)
         self.stop_reason = "runtime_limit_reached"
-        self._emit(
-            "continuous_stop",
-            stop_reason=self.stop_reason,
-            completed_chunks=self.completed_chunks,
-            completed_command_steps=self.completed_steps,
-            cumulative_runtime_s=self.clock() - started_s,
-        )
+        self._emit_continuous_stop()
         self._transition(DeploymentState.HOLD, self.stop_reason)
         return 0
 
@@ -572,11 +579,18 @@ class Runner:
             self.stop_reason = "one_chunk_complete"
             self._transition(DeploymentState.HOLD, self.stop_reason)
             result = 0
+        except KeyboardInterrupt:
+            self.stop_reason = "operator_interrupt"
+            if self.safety.state not in {DeploymentState.HOLD, DeploymentState.FAULT}:
+                self._transition(DeploymentState.HOLD, self.stop_reason)
+            self._emit_continuous_stop()
+            result = 0
         except InferenceTimeout as exc:
             self.stop_reason = f"inference_timeout: {exc}"
             if self.safety.state not in {DeploymentState.HOLD, DeploymentState.FAULT}:
                 self._transition(DeploymentState.HOLD, self.stop_reason)
             self._emit("exception", error_type=type(exc).__name__, message=str(exc))
+            self._emit_continuous_stop()
         except Exception as exc:
             self.stop_reason = f"{type(exc).__name__}: {exc}"
             if self.safety.state not in {DeploymentState.HOLD, DeploymentState.FAULT}:
@@ -585,6 +599,7 @@ class Runner:
                 except SafetyFault:
                     pass
             self._emit("exception", error_type=type(exc).__name__, message=str(exc))
+            self._emit_continuous_stop()
         finally:
             self.close()
         return result

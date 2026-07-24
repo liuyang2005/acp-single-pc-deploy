@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 
 from acp_single_pc_deploy.robot.hardware import HOME_JOINTS_DEG
+from acp_single_pc_deploy.robot.client import InferenceTimeout
 from acp_single_pc_deploy.robot.runner import Runner, RunnerSettings
 from acp_single_pc_deploy.robot.safety import DeploymentState
 
@@ -133,3 +134,78 @@ def test_continuous_dry_run_repeats_without_sending_pose(fake_components) -> Non
     assert len(fake_components.observed_request_ids) >= 2
     assert fake_components.hardware.policy_pose_commands == []
     assert runner.stop_reason == "runtime_limit_reached"
+
+
+def test_continuous_interrupt_is_normal_hold_and_cleans_up(fake_components) -> None:
+    original_observe = fake_components.observe
+
+    def interrupt_on_second_request(request_id):
+        if request_id == 1:
+            raise KeyboardInterrupt
+        return original_observe(request_id)
+
+    fake_components.observe = interrupt_on_second_request
+    runner = Runner.for_test(
+        "continuous",
+        fake_components,
+        settings=continuous_settings(max_continuous_runtime_s=0.1),
+    )
+
+    assert runner.run_once() == 0
+    assert runner.stop_reason == "operator_interrupt"
+    assert runner.safety.state is DeploymentState.HOLD
+    assert fake_components.hardware.stopped
+    assert any(
+        e["type"] == "continuous_stop" and e["stop_reason"] == "operator_interrupt"
+        for e in fake_components.events
+    )
+
+
+def test_continuous_inference_timeout_never_reuses_previous_action(fake_components) -> None:
+    original_infer = fake_components.client.infer
+
+    def timeout_on_second_request(packet):
+        if packet.request_id == 1:
+            raise InferenceTimeout("injected")
+        return original_infer(packet)
+
+    fake_components.client.infer = timeout_on_second_request
+    runner = Runner.for_test(
+        "continuous",
+        fake_components,
+        settings=continuous_settings(max_continuous_runtime_s=0.1),
+    )
+
+    assert runner.run_once() == 1
+    assert runner.stop_reason.startswith("inference_timeout:")
+    assert [p.request_id for p in fake_components.client.inferred_packets] == [0]
+    assert runner.completed_chunks == 1
+
+
+def test_deadline_mid_chunk_does_not_increment_completed_chunks(fake_components) -> None:
+    runner = Runner.for_test(
+        "continuous",
+        fake_components,
+        settings=continuous_settings(
+            max_continuous_runtime_s=0.03,
+            control_period_s=0.02,
+        ),
+    )
+
+    assert runner.run_once() == 0
+    assert runner.completed_chunks == 0
+    assert runner.completed_steps > 0
+
+
+def test_continuous_events_have_one_start_and_stop_summary(fake_components) -> None:
+    runner = Runner.for_test(
+        "continuous-dry-run", fake_components, settings=continuous_settings()
+    )
+
+    assert runner.run_once() == 0
+    starts = [e for e in fake_components.events if e["type"] == "continuous_start"]
+    stops = [e for e in fake_components.events if e["type"] == "continuous_stop"]
+    assert len(starts) == len(stops) == 1
+    assert stops[0]["completed_chunks"] == runner.completed_chunks
+    assert stops[0]["completed_command_steps"] == runner.completed_steps
+    assert "cumulative_runtime_s" in stops[0]
