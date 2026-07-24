@@ -456,14 +456,22 @@ def _make_flexiv_config(config: dict[str, Any]) -> FlexivConfig:
 def _make_limits(config: dict[str, Any]) -> SafetyLimits:
     safety = config["safety"]
     execution = config["execution"]
+    stiffness_min = float(safety["stiffness_min_n_m"])
+    stiffness_max = float(safety["stiffness_max_n_m"])
+    inner_stiffness = float(execution["inner_translation_stiffness_n_m"])
+    if not 0.0 < stiffness_min <= stiffness_max <= inner_stiffness:
+        raise ValueError(
+            "policy stiffness range must be positive, ordered, and not exceed "
+            "inner translation stiffness"
+        )
     return SafetyLimits(
         max_raw_force_norm_n=float(safety["max_raw_force_norm_n"]),
         max_raw_torque_norm_nm=float(safety["max_raw_torque_norm_nm"]),
         max_delta_force_norm_n=float(safety["max_delta_force_norm_n"]),
         max_delta_torque_norm_nm=float(safety["max_delta_torque_norm_nm"]),
-        stiffness_min_n_m=float(safety["stiffness_min_n_m"]),
-        stiffness_max_n_m=float(safety["stiffness_max_n_m"]),
-        inner_translation_stiffness_n_m=float(execution["inner_translation_stiffness_n_m"]),
+        stiffness_min_n_m=stiffness_min,
+        stiffness_max_n_m=stiffness_max,
+        inner_translation_stiffness_n_m=inner_stiffness,
         max_translation_step_m=float(safety["max_translation_step_m"]),
         max_rotation_step_rad=float(safety["max_rotation_step_rad"]),
         max_workspace_radius_m=float(safety["max_workspace_radius_m"]),

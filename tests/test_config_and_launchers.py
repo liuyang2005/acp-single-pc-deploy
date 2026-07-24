@@ -4,7 +4,10 @@ import subprocess
 import os
 from pathlib import Path
 
+import pytest
+
 from acp_single_pc_deploy.common.config import load_yaml_mapping
+from acp_single_pc_deploy.robot.runner import _make_limits
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -38,8 +41,22 @@ def test_fixed_inference_and_robot_configs() -> None:
     assert robot["camera"]["start_attempts"] == 2
     assert robot["camera"]["retry_delay_s"] == 1.0
     assert robot["camera"]["start_timeout_s"] == 35.0
+    assert robot["safety"]["stiffness_min_n_m"] == 200.0
+    assert robot["safety"]["stiffness_max_n_m"] == 5000.0
+    assert (
+        robot["safety"]["stiffness_max_n_m"]
+        <= robot["execution"]["inner_translation_stiffness_n_m"]
+    )
     assert robot["execution"]["execute_points"] == 12
     assert not any(key.lower() == "zeroftsensor" or "zero_ft" in key.lower() for key in _all_keys(robot))
+
+
+def test_policy_stiffness_cannot_exceed_inner_translation_stiffness() -> None:
+    robot = load_yaml_mapping(ROOT / "configs" / "robot.yaml")
+    robot["safety"]["stiffness_max_n_m"] = 5001.0
+
+    with pytest.raises(ValueError, match="inner translation stiffness"):
+        _make_limits(robot)
 
 
 def test_launcher_uses_fixed_checkpoint_and_conda_environments() -> None:
