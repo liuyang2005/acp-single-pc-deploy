@@ -497,6 +497,7 @@ def main(argv: list[str] | None = None) -> int:
                 width=int(camera["width"]),
                 height=int(camera["height"]),
                 fps=int(camera["fps"]),
+                frame_timeout_ms=int(camera["frame_timeout_ms"]),
             ),
             buffer_capacity=int(acquisition["buffer_capacity"]),
             robot_state_hz=float(acquisition["robot_state_hz"]),

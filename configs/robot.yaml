@@ -19,6 +19,7 @@ camera:
   width: 640
   height: 480
   fps: 30
+  frame_timeout_ms: 15000
   color_order: RGB
   policy_width: 224
   policy_height: 224

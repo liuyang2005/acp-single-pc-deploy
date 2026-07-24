@@ -65,6 +65,7 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available(), tor
 
 腕部相机采集 `640x480 BGR8`，读取后先转成 RGB，再按官方实机输入方式做
 等比例缩放和中心裁剪，最终交给 checkpoint 的尺寸是 `224x224 RGB`。
+首帧等待上限为 15 秒；超过该时间仍无彩色帧时进入 FAULT，不会无限等待。
 
 ## 4. 必须先运行 dry-run
 

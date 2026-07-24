@@ -48,10 +48,22 @@ def write_rgb_png(path: str | Path, image: np.ndarray) -> None:
 class RealSenseWristSource:
     color_order = "RGB"
 
-    def __init__(self, serial: str, width: int, height: int, fps: int) -> None:
+    def __init__(
+        self,
+        serial: str,
+        width: int,
+        height: int,
+        fps: int,
+        frame_timeout_ms: int = 15000,
+    ) -> None:
         if not isinstance(serial, str) or not serial.strip():
             raise ValueError("wrist camera serial must be explicit and nonempty")
-        for name, value in (("width", width), ("height", height), ("fps", fps)):
+        for name, value in (
+            ("width", width),
+            ("height", height),
+            ("fps", fps),
+            ("frame_timeout_ms", frame_timeout_ms),
+        ):
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
         rs = importlib.import_module("pyrealsense2")
@@ -60,6 +72,7 @@ class RealSenseWristSource:
         config.enable_device(serial)
         config.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
         self._shape = (height, width, 3)
+        self._frame_timeout_ms = frame_timeout_ms
         self._closed = False
         try:
             self._pipeline.start(config)
@@ -70,7 +83,7 @@ class RealSenseWristSource:
     def read(self) -> tuple[float, np.ndarray]:
         if self._closed:
             raise RuntimeError("wrist camera is closed")
-        frames = self._pipeline.wait_for_frames()
+        frames = self._pipeline.wait_for_frames(timeout_ms=self._frame_timeout_ms)
         frame = frames.get_color_frame()
         if not frame:
             raise RuntimeError("RealSense frameset has no color frame")

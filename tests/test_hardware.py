@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from acp_single_pc_deploy.robot import sensors
 from acp_single_pc_deploy.robot.hardware import FlexivConfig, FlexivHardware, HOME_JOINTS_DEG
 from acp_single_pc_deploy.robot.sensors import RealSenseWristSource, bgr_to_rgb
 
@@ -97,3 +98,43 @@ def test_camera_requires_explicit_serial() -> None:
 def test_bgr_is_converted_to_rgb() -> None:
     bgr = np.array([[[1, 2, 3]]], dtype=np.uint8)
     np.testing.assert_array_equal(bgr_to_rgb(bgr), [[[3, 2, 1]]])
+
+
+def test_camera_passes_configured_timeout_to_frame_wait(monkeypatch) -> None:
+    class Pipeline:
+        def __init__(self):
+            self.timeout_ms = None
+
+        def start(self, config):
+            return None
+
+        def wait_for_frames(self, timeout_ms):
+            self.timeout_ms = timeout_ms
+            frame = SimpleNamespace(get_data=lambda: np.zeros((480, 640, 3), dtype=np.uint8))
+            return SimpleNamespace(get_color_frame=lambda: frame)
+
+        def stop(self):
+            return None
+
+    pipeline = Pipeline()
+    fake_rs = SimpleNamespace(
+        pipeline=lambda: pipeline,
+        config=lambda: SimpleNamespace(
+            enable_device=lambda serial: None,
+            enable_stream=lambda *args: None,
+        ),
+        stream=SimpleNamespace(color="color"),
+        format=SimpleNamespace(bgr8="bgr8"),
+    )
+    monkeypatch.setattr(sensors.importlib, "import_module", lambda name: fake_rs)
+
+    source = RealSenseWristSource(
+        serial="260322274925",
+        width=640,
+        height=480,
+        fps=30,
+        frame_timeout_ms=15000,
+    )
+    source.read()
+
+    assert pipeline.timeout_ms == 15000
