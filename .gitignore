@@ -1,0 +1,29 @@
+# Python caches and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local Python environments
+.venv/
+venv/
+env/
+
+# Runtime artifacts
+logs/
+frames/
+*.log
+
+# Model artifacts and local settings
+*.ckpt
+*.pth
+*.pt
+.env
+.env.*
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

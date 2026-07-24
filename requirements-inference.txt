@@ -1,0 +1,2 @@
+-r requirements-common.txt
+# Install the RTX 5060-compatible PyTorch/CUDA build separately, then install ACP's own environment.
