@@ -88,9 +88,14 @@ bash acp_single_pc_deploy/run_single_pc.sh dry-run
 相机、记录 2 秒 wrench 基线、构建历史并完成一次真实 checkpoint 推理，但不会发送
 模型产生的笛卡尔位姿。结束状态应为 `HOLD`，这是预期结果，不会自动恢复运行。
 
-至少检查：相机画面方向和 RGB 颜色正确、推理无超时、raw/delta wrench 未越界、
-预测位姿和刚度为有限值、没有 `stiffness_clipped` 或频繁的位姿限幅。程序会在
-dry-run 的 `frames/` 中保存本次推理使用的腕部 RGB，不保存全帧视频，以免影响时序。
+ACP 训练标签的刚度范围是 `200-5000 N/m`。配置要求策略刚度上限不超过内层平移
+刚度，连接机器人时还会验证内层笛卡尔刚度不超过 Flexiv 报告的额定刚度。
+
+至少检查：相机画面方向和 RGB 颜色正确、推理无超时、raw/delta wrench 未越界，
+`events.jsonl` 中恰好有 12 条 `action_preview_point`、汇总事件的
+`stiffness_clip_count` 为 0，并且没有频繁的位姿限幅。任何预览点发生
+`stiffness_clipped` 都会使 dry-run 进入 FAULT。程序会在 dry-run 的 `frames/` 中
+保存本次推理使用的腕部 RGB，不保存全帧视频，以免影响时序。
 
 也可用两个终端分别诊断：
 
