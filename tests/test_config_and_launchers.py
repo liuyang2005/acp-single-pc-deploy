@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 
 from acp_single_pc_deploy.common.config import load_yaml_mapping
-from acp_single_pc_deploy.robot.runner import _make_limits
+from acp_single_pc_deploy.robot.runner import (
+    RunnerSettings,
+    _make_continuous_workspace,
+    _make_limits,
+    build_arg_parser,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,6 +55,11 @@ def test_fixed_inference_and_robot_configs() -> None:
         <= robot["execution"]["inner_translation_stiffness_n_m"]
     )
     assert robot["execution"]["execute_points"] == 12
+    assert robot["continuous"]["execute_points"] == 4
+    assert robot["continuous"]["max_runtime_s"] == 120.0
+    assert robot["continuous"]["workspace_min_xyz_m"] == [0.55, -0.14, 0.04]
+    assert robot["continuous"]["workspace_max_xyz_m"] == [0.92, 0.13, 0.43]
+    assert robot["continuous"]["max_equivalent_target_distance_m"] == 0.20
     assert not any(key.lower() == "zeroftsensor" or "zero_ft" in key.lower() for key in _all_keys(robot))
 
 
@@ -59,6 +69,25 @@ def test_policy_stiffness_cannot_exceed_inner_translation_stiffness() -> None:
 
     with pytest.raises(ValueError, match="inner translation stiffness"):
         _make_limits(robot)
+
+
+def test_parser_accepts_explicit_continuous_modes() -> None:
+    parser = build_arg_parser()
+    for mode in ("dry-run", "execute", "continuous-dry-run", "continuous"):
+        args = parser.parse_args(["--mode", mode, "--config", "robot.yaml"])
+        assert args.mode == mode
+
+
+def test_continuous_config_rejects_inverted_workspace() -> None:
+    robot = load_yaml_mapping(ROOT / "configs" / "robot.yaml")
+    robot["continuous"]["workspace_min_xyz_m"][0] = 0.93
+    with pytest.raises(ValueError, match="minimum"):
+        _make_continuous_workspace(robot)
+
+
+def test_runner_settings_reject_invalid_continuous_point_count() -> None:
+    with pytest.raises(ValueError, match="continuous_execute_points"):
+        RunnerSettings(continuous_execute_points=0)
 
 
 def test_launcher_uses_fixed_checkpoint_and_conda_environments() -> None:

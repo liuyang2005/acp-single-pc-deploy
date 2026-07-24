@@ -45,6 +45,13 @@ execution:
   max_angular_velocity_rad_s: 0.05
   max_angular_acceleration_rad_s2: 0.05
 
+continuous:
+  execute_points: 4
+  max_runtime_s: 120.0
+  max_equivalent_target_distance_m: 0.20
+  workspace_min_xyz_m: [0.55, -0.14, 0.04]
+  workspace_max_xyz_m: [0.92, 0.13, 0.43]
+
 safety:
   max_raw_force_norm_n: 25.0
   max_raw_torque_norm_nm: 2.0

@@ -24,6 +24,7 @@ from acp_single_pc_deploy.robot.sensors import (
     write_rgb_png,
 )
 from acp_single_pc_deploy.robot.safety import (
+    ContinuousWorkspaceLimits,
     DeploymentState,
     SafetyFault,
     SafetyLimits,
@@ -40,6 +41,22 @@ class RunnerSettings:
     baseline_sample_period_s: float = 0.005
     execute_points: int = 12
     control_period_s: float = 0.005
+    continuous_execute_points: int = 4
+    max_continuous_runtime_s: float = 120.0
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.execute_points <= EXPECTED_CONTRACT.action_horizon:
+            raise ValueError("execute_points must be within the action horizon")
+        if not 1 <= self.continuous_execute_points <= EXPECTED_CONTRACT.action_horizon:
+            raise ValueError("continuous_execute_points must be within the action horizon")
+        if (
+            not np.isfinite(self.max_continuous_runtime_s)
+            or self.max_continuous_runtime_s <= 0.0
+        ):
+            raise ValueError("max_continuous_runtime_s must be finite and positive")
+
+
+MODES = ("dry-run", "execute", "continuous-dry-run", "continuous")
 
 
 class RobotObservationRuntime:
@@ -187,10 +204,14 @@ class Runner:
         sleep: Callable[[float], None] = time.sleep,
         settings: RunnerSettings = RunnerSettings(),
         limits: SafetyLimits | None = None,
+        continuous_workspace: ContinuousWorkspaceLimits | None = None,
         event_sink: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
-        if mode not in {"dry-run", "execute"}:
-            raise ValueError("mode must be dry-run or execute")
+        if mode not in MODES:
+            raise ValueError(f"mode must be one of {', '.join(MODES)}")
+        is_continuous = mode in {"continuous-dry-run", "continuous"}
+        if is_continuous and continuous_workspace is None:
+            raise ValueError("continuous modes require continuous workspace limits")
         self.mode = mode
         self.hardware = hardware
         self.camera = camera
@@ -200,7 +221,10 @@ class Runner:
         self.clock = clock
         self.sleep = sleep
         self.settings = settings
-        self.safety = SafetySupervisor(limits or SafetyLimits.defaults())
+        self.safety = SafetySupervisor(
+            limits or SafetyLimits.defaults(),
+            continuous_workspace if is_continuous else None,
+        )
         self.event_sink = event_sink or (lambda _event: None)
         self.stop_reason = "not_started"
         self.completed_steps = 0
@@ -209,7 +233,24 @@ class Runner:
         self._closed = False
 
     @classmethod
-    def for_test(cls, mode: str, components: Any) -> Runner:
+    def for_test(
+        cls,
+        mode: str,
+        components: Any,
+        settings: RunnerSettings | None = None,
+    ) -> Runner:
+        test_settings = settings or RunnerSettings(
+            baseline_duration_s=0.0,
+            baseline_sample_period_s=0.0,
+            control_period_s=0.001,
+        )
+        continuous_workspace = None
+        if mode in {"continuous-dry-run", "continuous"}:
+            continuous_workspace = ContinuousWorkspaceLimits(
+                minimum_xyz_m=np.array([0.55, -0.14, 0.04]),
+                maximum_xyz_m=np.array([0.92, 0.13, 0.43]),
+                max_equivalent_target_distance_m=0.20,
+            )
         return cls(
             mode=mode,
             hardware=components.hardware,
@@ -219,11 +260,8 @@ class Runner:
             confirm=components.confirm,
             clock=components.clock,
             sleep=components.sleep,
-            settings=RunnerSettings(
-                baseline_duration_s=0.0,
-                baseline_sample_period_s=0.0,
-                control_period_s=0.001,
-            ),
+            settings=test_settings,
+            continuous_workspace=continuous_workspace,
             event_sink=components.events.append,
         )
 
@@ -503,6 +541,17 @@ def _make_limits(config: dict[str, Any]) -> SafetyLimits:
     )
 
 
+def _make_continuous_workspace(config: dict[str, Any]) -> ContinuousWorkspaceLimits:
+    continuous = config["continuous"]
+    return ContinuousWorkspaceLimits(
+        minimum_xyz_m=np.asarray(continuous["workspace_min_xyz_m"], dtype=np.float64),
+        maximum_xyz_m=np.asarray(continuous["workspace_max_xyz_m"], dtype=np.float64),
+        max_equivalent_target_distance_m=float(
+            continuous["max_equivalent_target_distance_m"]
+        ),
+    )
+
+
 def _confirmation(serial: str) -> Callable[[str], bool]:
     gate = 0
 
@@ -519,7 +568,7 @@ def _confirmation(serial: str) -> Callable[[str], bool]:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run guarded single-PC ACP deployment")
-    parser.add_argument("--mode", required=True, choices=("dry-run", "execute"))
+    parser.add_argument("--mode", required=True, choices=MODES)
     parser.add_argument("--config", required=True)
     return parser
 
@@ -529,7 +578,16 @@ def main(argv: list[str] | None = None) -> int:
     config = load_yaml_mapping(args.config)
     require_keys(
         config,
-        ("network", "robot", "camera", "acquisition", "execution", "safety", "logging"),
+        (
+            "network",
+            "robot",
+            "camera",
+            "acquisition",
+            "execution",
+            "continuous",
+            "safety",
+            "logging",
+        ),
         "robot config",
     )
     run_dir = create_run_directory(config["logging"]["root"], args.mode.replace("-", "_"))
@@ -557,6 +615,11 @@ def main(argv: list[str] | None = None) -> int:
         camera = config["camera"]
         acquisition = config["acquisition"]
         limits = _make_limits(config)
+        continuous_workspace = (
+            _make_continuous_workspace(config)
+            if args.mode in {"continuous-dry-run", "continuous"}
+            else None
+        )
         runtime = RobotObservationRuntime(
             hardware=hardware,
             camera_factory=lambda: RealSenseWristSource(
@@ -591,6 +654,8 @@ def main(argv: list[str] | None = None) -> int:
             baseline_sample_period_s=float(acquisition["baseline_sample_period_s"]),
             execute_points=int(config["execution"]["execute_points"]),
             control_period_s=float(config["execution"]["control_period_s"]),
+            continuous_execute_points=int(config["continuous"]["execute_points"]),
+            max_continuous_runtime_s=float(config["continuous"]["max_runtime_s"]),
         )
         frames_dir = run_dir / "frames"
 
@@ -622,6 +687,7 @@ def main(argv: list[str] | None = None) -> int:
             confirm=_confirmation(str(config["robot"]["serial"])),
             settings=settings,
             limits=limits,
+            continuous_workspace=continuous_workspace,
             event_sink=event_sink,
         )
         result = runner.run_once()
