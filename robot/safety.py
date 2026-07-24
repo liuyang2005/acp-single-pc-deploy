@@ -48,6 +48,7 @@ class SafetyLimits:
     inner_translation_stiffness_n_m: float
     max_translation_step_m: float
     max_rotation_step_rad: float
+    max_equivalent_target_radius_m: float
     max_workspace_radius_m: float
     max_rgb_age_s: float
     max_pose_age_s: float
@@ -65,6 +66,7 @@ class SafetyLimits:
             inner_translation_stiffness_n_m=5000.0,
             max_translation_step_m=0.002,
             max_rotation_step_rad=0.035,
+            max_equivalent_target_radius_m=0.20,
             max_workspace_radius_m=0.08,
             max_rgb_age_s=0.20,
             max_pose_age_s=0.05,
@@ -171,9 +173,9 @@ class SafetySupervisor:
         if self._start_pose7 is None:
             self.fault("start pose is not latched")
         assert self._start_pose7 is not None
-        radius = float(np.linalg.norm(requested[:3] - self._start_pose7[:3]))
-        if radius > self.limits.max_workspace_radius_m:
-            self.fault(f"requested pose exceeds workspace radius: {radius:.6f}")
+        target_radius = float(np.linalg.norm(requested[:3] - self._start_pose7[:3]))
+        if target_radius > self.limits.max_equivalent_target_radius_m:
+            self.fault(f"requested pose exceeds equivalent target radius: {target_radius:.6f}")
         result = requested.copy()
         messages: list[str] = []
         translation = requested[:3] - current[:3]
@@ -188,6 +190,9 @@ class SafetySupervisor:
                 current[3:], requested[3:], self.limits.max_rotation_step_rad / angle
             )
             messages.append("rotation_step")
+        applied_radius = float(np.linalg.norm(result[:3] - self._start_pose7[:3]))
+        if applied_radius > self.limits.max_workspace_radius_m:
+            self.fault(f"applied pose exceeds workspace radius: {applied_radius:.6f}")
         self._last_limit_messages = tuple(messages)
         return result
 

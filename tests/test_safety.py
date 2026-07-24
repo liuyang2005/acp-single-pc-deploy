@@ -45,14 +45,28 @@ def test_hold_and_fault_are_latched() -> None:
         supervisor.transition(DeploymentState.RUNNING, "resume")
 
 
-def test_pose_is_step_limited_but_absolute_workspace_violation_faults() -> None:
+def test_pose_is_step_limited_within_target_and_workspace_guards() -> None:
     supervisor = SafetySupervisor(SafetyLimits.defaults())
     supervisor.latch_start_pose(pose())
-    limited = supervisor.limit_pose(pose(0.01), current_pose7=pose())
+    limited = supervisor.limit_pose(pose(0.09), current_pose7=pose())
     assert limited[0] == pytest.approx(0.002)
     assert "translation_step" in supervisor.last_limit_messages
-    with pytest.raises(SafetyFault, match="workspace"):
-        supervisor.limit_pose(pose(0.09), current_pose7=pose())
+
+
+def test_equivalent_target_radius_faults_before_step_limiting() -> None:
+    supervisor = SafetySupervisor(SafetyLimits.defaults())
+    supervisor.latch_start_pose(pose())
+
+    with pytest.raises(SafetyFault, match="equivalent target radius"):
+        supervisor.limit_pose(pose(0.201), current_pose7=pose())
+
+
+def test_step_limited_command_still_obeys_applied_workspace_radius() -> None:
+    supervisor = SafetySupervisor(SafetyLimits.defaults())
+    supervisor.latch_start_pose(pose())
+
+    with pytest.raises(SafetyFault, match="applied pose exceeds workspace radius"):
+        supervisor.limit_pose(pose(0.15), current_pose7=pose(0.079))
 
 
 def test_stiffness_is_clipped_and_nonfinite_faults() -> None:

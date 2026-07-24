@@ -90,6 +90,8 @@ bash acp_single_pc_deploy/run_single_pc.sh dry-run
 
 ACP 训练标签的刚度范围是 `200-5000 N/m`。配置要求策略刚度上限不超过内层平移
 刚度，连接机器人时还会验证内层笛卡尔刚度不超过 Flexiv 报告的额定刚度。
+原始等效目标必须位于启动点 `0.20 m` 内；经过单步限幅、真正可能发送的位姿还必须
+位于启动点 `0.08 m` 内。这两项分别防止模型目标失控和实际命令超出保护范围。
 
 至少检查：相机画面方向和 RGB 颜色正确、推理无超时、raw/delta wrench 未越界，
 `events.jsonl` 中恰好有 12 条 `action_preview_point`、汇总事件的

@@ -43,6 +43,8 @@ def test_fixed_inference_and_robot_configs() -> None:
     assert robot["camera"]["start_timeout_s"] == 35.0
     assert robot["safety"]["stiffness_min_n_m"] == 200.0
     assert robot["safety"]["stiffness_max_n_m"] == 5000.0
+    assert robot["safety"]["max_equivalent_target_radius_m"] == 0.20
+    assert robot["safety"]["max_workspace_radius_m"] == 0.08
     assert (
         robot["safety"]["stiffness_max_n_m"]
         <= robot["execution"]["inner_translation_stiffness_n_m"]

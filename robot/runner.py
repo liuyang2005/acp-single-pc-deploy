@@ -495,6 +495,7 @@ def _make_limits(config: dict[str, Any]) -> SafetyLimits:
         inner_translation_stiffness_n_m=inner_stiffness,
         max_translation_step_m=float(safety["max_translation_step_m"]),
         max_rotation_step_rad=float(safety["max_rotation_step_rad"]),
+        max_equivalent_target_radius_m=float(safety["max_equivalent_target_radius_m"]),
         max_workspace_radius_m=float(safety["max_workspace_radius_m"]),
         max_rgb_age_s=float(safety["max_rgb_age_s"]),
         max_pose_age_s=float(safety["max_pose_age_s"]),

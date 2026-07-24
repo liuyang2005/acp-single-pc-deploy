@@ -52,7 +52,7 @@ def test_dry_run_safety_previews_model_action_without_sending(fake_components) -
 
     def unsafe_infer(packet):
         chunk = original_infer(packet)
-        chunk.virtual_pose7[:, 0] = 1.0
+        chunk.virtual_pose7[:, 0] = 3.0
         return chunk
 
     fake_components.client.infer = unsafe_infer

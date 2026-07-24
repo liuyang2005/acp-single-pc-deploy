@@ -223,3 +223,12 @@ no remaining robot runner process
 ```
 
 Do not run `execute` as part of this plan.
+
+## Approved Safety Revision
+
+Hardware dry-run showed that the original single `0.08 m` check ran against the
+raw equivalent target before step limiting. The approved correction adds
+`max_equivalent_target_radius_m: 0.20` for that raw target and retains
+`max_workspace_radius_m: 0.08` for the step-limited pose that could be sent.
+Both guards require focused safety tests and remain part of the remote dry-run
+acceptance gate.
