@@ -100,11 +100,23 @@ def test_launcher_uses_fixed_checkpoint_and_conda_environments() -> None:
         'CHECKPOINT_PATH="${HOME}/haptic_exo_teleop_ws/liuyang/acp_checkpoints/latest.ckpt"'
         in combined_script
     )
-    assert 'MODE="${1:?' in combined_script
+    assert (
+        'MODE="${1:?usage: run_single_pc.sh '
+        'dry-run|execute|continuous-dry-run|continuous}"'
+        in combined_script
+    )
     assert "${2:?" not in combined_script
     assert '[[ ! -f "${CHECKPOINT_PATH}" ]]' in combined_script
     assert "conda run" in combined_script
     assert "--health" in combined_script
+    for mode in ("continuous_dry_run", "continuous"):
+        assert (ROOT / f"run_{mode}.sh").is_file()
+    assert "--mode continuous-dry-run" in (
+        ROOT / "run_continuous_dry_run.sh"
+    ).read_text(encoding="utf-8")
+    assert "--mode continuous" in (ROOT / "run_continuous.sh").read_text(
+        encoding="utf-8"
+    )
 
 
 def test_all_launchers_have_valid_bash_syntax() -> None:
@@ -128,6 +140,12 @@ def test_readme_documents_two_environment_hardware_gate() -> None:
         "latest.ckpt",
         "紧急停止",
         "不调用 `ZeroFTSensor`",
+        "continuous-dry-run",
+        "continuous",
+        "120",
+        "0.55",
+        "0.92",
+        "Ctrl+C",
     ):
         assert required in text
 

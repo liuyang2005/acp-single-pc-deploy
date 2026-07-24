@@ -12,7 +12,8 @@ RTX 5060 上运行两个本地进程：ACP 推理进程使用新建的推理环�
 - 腕部相机：`260322274925`，数据名 `cam_260322274925_wrist`；
 - 只使用 RGB，不使用深度、点云、主相机或夹爪；
 - 不调用 `ZeroFTSensor`，ACP 始终接收未经基线扣除的 `ext_wrench_in_tcp`；
-- 第一次执行只运行一个 action chunk 的前 12 个稀疏点，然后锁存 HOLD。
+- `execute` 只运行一个 action chunk 的前 12 个稀疏点；连续模式每次推理只执行
+  前 4 点，然后重新采集观测。
 
 ## 1. 把训练结果复制到操作电脑
 
@@ -129,14 +130,45 @@ execute 有两道独立确认：第一次输入 `y` 才允许自动归位；首�
 ACP 官方 ManipServer 的动态 6x6 刚度控制，日志中的 predicted/applied stiffness 和
 equivalent/applied pose 必须分别理解。
 
-## 6. 日志与恢复
+## 6. 连续闭环执行
+
+单段 `execute` 日志通过后，必须先运行连续 dry-run：
+
+```bash
+bash acp_single_pc_deploy/run_single_pc.sh continuous-dry-run
+```
+
+`continuous-dry-run` 会真实连接机器人并自动归位，但不会发送任何策略位姿。它重复
+采集腕部图像、位姿与 wrench，按严格递增的 request ID 调用推理，并逐轮预览前 4 个
+动作点。运行上限是 120 秒，正常结束原因应为 `runtime_limit_reached`。必须检查每轮
+保存的腕部 RGB、推理延迟、刚度、等效目标与工作空间预测；任何异常都不能进入真实
+连续执行。
+
+真实连续模式使用以下绝对 TCP 工作空间：`x=[0.55, 0.92] m`、
+`y=[-0.14, 0.13] m`、`z=[0.04, 0.43] m`。每轮原始等效目标距离该轮起始 TCP
+不得超过 `0.20 m`。所有原有力/力矩、传感器时效、刚度、速度和单步位姿限制继续
+逐控制周期生效。连续运动最多运行 120 秒；`Ctrl+C` 是正常操作员停止，物理紧急停止
+始终是最高优先级。
+
+只有操作者已在现场、机器人周围和自动归位轨迹已清空、紧急停止可立即触及、夹爪已
+手动闭合时，才能启动：
+
+```bash
+bash acp_single_pc_deploy/run_single_pc.sh continuous
+```
+
+输入 `y` 允许归位，收到首个有效动作后完整输入 `Rizon4s-063586` 才开始连续运动。
+不得通过 SSH 自动启动真实 `continuous`；SSH 仅用于更新代码、查看日志和执行不发送
+策略位姿的诊断。
+
+## 7. 日志与恢复
 
 每次机器人进程都会在 `acp_single_pc_deploy/logs/robot/` 下创建不覆盖的目录：
 
-- `metadata.json`：模式、完整配置、返回码、停止原因和已发送命令数；
+- `metadata.json`：模式、完整配置、返回码、停止原因、完成 chunk 数和已发送命令数；
 - `events.jsonl`：状态转换、归位、基线、原始/差分 wrench、完整动作和命令；
-- `timing.csv`：推理/动作周期字段表，供后续扩展逐周期统计。
-- `frames/`：dry-run 中实际送入本次推理的 `224x224 RGB` PNG。
+- `timing.csv`：逐 chunk 的 request ID、推理延迟、动作周期、点数、命令数和累计时间；
+- `frames/`：dry-run 和连续模式中实际送入推理的 `224x224 RGB` PNG。
 
 HOLD 和 FAULT 都不会在进程内解除。排查日志和硬件状态后，重新启动两个进程并重新
 通过确认。组合启动脚本只终止它自己创建的推理子进程，不会按名称批量杀死其他任务。

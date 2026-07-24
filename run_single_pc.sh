@@ -6,10 +6,11 @@ ACP_ENV="pyrite"
 ROBOT_ENV="haptic_exo_env"
 CHECKPOINT_PATH="${HOME}/haptic_exo_teleop_ws/liuyang/acp_checkpoints/latest.ckpt"
 
-MODE="${1:?usage: run_single_pc.sh dry-run|execute}"
+MODE="${1:?usage: run_single_pc.sh dry-run|execute|continuous-dry-run|continuous}"
 
-if [[ "${MODE}" != "dry-run" && "${MODE}" != "execute" ]]; then
-  echo "mode must be dry-run or execute" >&2
+if [[ "${MODE}" != "dry-run" && "${MODE}" != "execute" \
+    && "${MODE}" != "continuous-dry-run" && "${MODE}" != "continuous" ]]; then
+  echo "mode must be dry-run, execute, continuous-dry-run, or continuous" >&2
   exit 2
 fi
 
