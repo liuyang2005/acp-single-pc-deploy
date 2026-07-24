@@ -38,6 +38,29 @@ class WrenchReading:
 
 
 @dataclass(frozen=True)
+class ContinuousWorkspaceLimits:
+    minimum_xyz_m: np.ndarray
+    maximum_xyz_m: np.ndarray
+    max_equivalent_target_distance_m: float
+
+    def __post_init__(self) -> None:
+        minimum = np.asarray(self.minimum_xyz_m, dtype=np.float64)
+        maximum = np.asarray(self.maximum_xyz_m, dtype=np.float64)
+        distance = float(self.max_equivalent_target_distance_m)
+        if minimum.shape != (3,) or maximum.shape != (3,):
+            raise ValueError("continuous workspace bounds must have shape (3,)")
+        if not np.all(np.isfinite(minimum)) or not np.all(np.isfinite(maximum)):
+            raise ValueError("continuous workspace bounds must be finite")
+        if np.any(minimum >= maximum):
+            raise ValueError("continuous workspace minimum must be below maximum")
+        if not np.isfinite(distance) or distance <= 0.0:
+            raise ValueError("continuous target distance must be finite and positive")
+        object.__setattr__(self, "minimum_xyz_m", minimum.copy())
+        object.__setattr__(self, "maximum_xyz_m", maximum.copy())
+        object.__setattr__(self, "max_equivalent_target_distance_m", distance)
+
+
+@dataclass(frozen=True)
 class SafetyLimits:
     max_raw_force_norm_n: float
     max_raw_torque_norm_nm: float
@@ -103,11 +126,17 @@ def _slerp_quaternion(start: np.ndarray, end: np.ndarray, fraction: float) -> np
 
 
 class SafetySupervisor:
-    def __init__(self, limits: SafetyLimits) -> None:
+    def __init__(
+        self,
+        limits: SafetyLimits,
+        continuous_workspace: ContinuousWorkspaceLimits | None = None,
+    ) -> None:
         self.limits = limits
+        self.continuous_workspace = continuous_workspace
         self.state = DeploymentState.INIT
         self.reason = "created"
         self._start_pose7: np.ndarray | None = None
+        self._cycle_pose7: np.ndarray | None = None
         self._last_limit_messages: tuple[str, ...] = ()
 
     @property
@@ -135,6 +164,9 @@ class SafetySupervisor:
 
     def latch_start_pose(self, pose7: np.ndarray) -> None:
         self._start_pose7 = self._validated_pose(pose7)
+
+    def latch_cycle_pose(self, pose7: np.ndarray) -> None:
+        self._cycle_pose7 = self._validated_pose(pose7)
 
     def validate_sensor_ages(self, ages_s: dict[str, float]) -> None:
         limits = {
@@ -170,12 +202,23 @@ class SafetySupervisor:
     def limit_pose(self, requested_pose7: np.ndarray, current_pose7: np.ndarray) -> np.ndarray:
         requested = self._validated_pose(requested_pose7)
         current = self._validated_pose(current_pose7)
-        if self._start_pose7 is None:
-            self.fault("start pose is not latched")
-        assert self._start_pose7 is not None
-        target_radius = float(np.linalg.norm(requested[:3] - self._start_pose7[:3]))
-        if target_radius > self.limits.max_equivalent_target_radius_m:
-            self.fault(f"requested pose exceeds equivalent target radius: {target_radius:.6f}")
+        continuous = self.continuous_workspace
+        if continuous is not None:
+            if self._cycle_pose7 is None:
+                self.fault("continuous cycle pose is not latched")
+            assert self._cycle_pose7 is not None
+            target_distance = float(np.linalg.norm(requested[:3] - self._cycle_pose7[:3]))
+            if target_distance > continuous.max_equivalent_target_distance_m:
+                self.fault(
+                    f"requested pose exceeds current TCP target distance: {target_distance:.6f}"
+                )
+        else:
+            if self._start_pose7 is None:
+                self.fault("start pose is not latched")
+            assert self._start_pose7 is not None
+            target_radius = float(np.linalg.norm(requested[:3] - self._start_pose7[:3]))
+            if target_radius > self.limits.max_equivalent_target_radius_m:
+                self.fault(f"requested pose exceeds equivalent target radius: {target_radius:.6f}")
         result = requested.copy()
         messages: list[str] = []
         translation = requested[:3] - current[:3]
@@ -190,9 +233,17 @@ class SafetySupervisor:
                 current[3:], requested[3:], self.limits.max_rotation_step_rad / angle
             )
             messages.append("rotation_step")
-        applied_radius = float(np.linalg.norm(result[:3] - self._start_pose7[:3]))
-        if applied_radius > self.limits.max_workspace_radius_m:
-            self.fault(f"applied pose exceeds workspace radius: {applied_radius:.6f}")
+        if continuous is not None:
+            xyz = result[:3]
+            if np.any(xyz < continuous.minimum_xyz_m) or np.any(
+                xyz > continuous.maximum_xyz_m
+            ):
+                self.fault(f"applied pose exceeds continuous workspace: {xyz.tolist()}")
+        else:
+            assert self._start_pose7 is not None
+            applied_radius = float(np.linalg.norm(result[:3] - self._start_pose7[:3]))
+            if applied_radius > self.limits.max_workspace_radius_m:
+                self.fault(f"applied pose exceeds workspace radius: {applied_radius:.6f}")
         self._last_limit_messages = tuple(messages)
         return result
 
