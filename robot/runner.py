@@ -43,6 +43,8 @@ class RunnerSettings:
     control_period_s: float = 0.005
     continuous_execute_points: int = 2
     continuous_commitment_points: int = EXPECTED_CONTRACT.action_horizon
+    continuous_contact_force_threshold_n: float = 5.0
+    continuous_min_upward_exit_m: float = 0.03
     max_continuous_runtime_s: float = 120.0
     orientation_source: str = "reference"
     expected_camera_view: str = "wrist"
@@ -60,6 +62,20 @@ class RunnerSettings:
             raise ValueError(
                 "continuous_commitment_points must be between "
                 "continuous_execute_points and the action horizon"
+            )
+        if (
+            not np.isfinite(self.continuous_contact_force_threshold_n)
+            or self.continuous_contact_force_threshold_n <= 0.0
+        ):
+            raise ValueError(
+                "continuous_contact_force_threshold_n must be finite and positive"
+            )
+        if (
+            not np.isfinite(self.continuous_min_upward_exit_m)
+            or self.continuous_min_upward_exit_m <= 0.0
+        ):
+            raise ValueError(
+                "continuous_min_upward_exit_m must be finite and positive"
             )
         if self.orientation_source not in {"reference", "virtual", "current"}:
             raise ValueError("orientation_source must be reference, virtual, or current")
@@ -289,6 +305,8 @@ class Runner:
         self._continuous_started_s: float | None = None
         self._continuous_deadline_s: float | None = None
         self._continuous_stop_emitted = False
+        self._latest_observation_pose7: np.ndarray | None = None
+        self._latest_delta_force_norm_n = 0.0
 
     @classmethod
     def for_test(
@@ -372,6 +390,12 @@ class Runner:
         self.safety.validate_sensor_ages(packet.latest_age_s)
         reading = WrenchReading.from_raw(packet.wrench[-1], self._baseline)
         self.safety.validate_wrench(reading)
+        self._latest_observation_pose7 = np.asarray(
+            packet.pose7[-1], dtype=np.float64
+        ).copy()
+        self._latest_delta_force_norm_n = float(
+            np.linalg.norm(reading.delta_wrench[:3])
+        )
         self._emit(
             "observation",
             request_id=packet.request_id,
@@ -524,7 +548,21 @@ class Runner:
             max_runtime_s=self.settings.max_continuous_runtime_s,
             execute_points=self.settings.continuous_execute_points,
             commitment_points=self.settings.continuous_commitment_points,
+            contact_force_threshold_n=(
+                self.settings.continuous_contact_force_threshold_n
+            ),
+            min_upward_exit_m=self.settings.continuous_min_upward_exit_m,
         )
+
+    def _continuous_commitment_metrics(self, chunk: Any) -> tuple[float, float]:
+        if self._latest_observation_pose7 is None:
+            raise RuntimeError("continuous commitment requires an observation pose")
+        final_point = self.settings.continuous_commitment_points - 1
+        upward_exit_m = float(
+            chunk.virtual_pose7[final_point, 2]
+            - self._latest_observation_pose7[2]
+        )
+        return self._latest_delta_force_norm_n, upward_exit_m
 
     def _emit_continuous_stop(self) -> None:
         if self._continuous_started_s is None or self._continuous_stop_emitted:
@@ -546,10 +584,40 @@ class Runner:
         next_request_id = first_chunk.request_id + 1
         plan = first_chunk
         plan_start_point = 0
+        plan_committed = False
         self._transition(DeploymentState.RUNNING, "continuous policy loop started")
         while self.clock() < deadline_s:
+            if not plan_committed:
+                force_norm_n, upward_exit_m = self._continuous_commitment_metrics(
+                    plan
+                )
+                plan_committed = bool(
+                    force_norm_n
+                    >= self.settings.continuous_contact_force_threshold_n
+                    and upward_exit_m
+                    >= self.settings.continuous_min_upward_exit_m
+                )
+                self._emit(
+                    "action_plan_commitment_check",
+                    request_id=plan.request_id,
+                    contact_force_norm_n=force_norm_n,
+                    upward_exit_m=upward_exit_m,
+                    committed=plan_committed,
+                )
+                if plan_committed:
+                    self._emit(
+                        "action_plan_commitment_started",
+                        request_id=plan.request_id,
+                        commitment_points=(
+                            self.settings.continuous_commitment_points
+                        ),
+                        contact_force_norm_n=force_norm_n,
+                        upward_exit_m=upward_exit_m,
+                    )
             remaining_points = (
                 self.settings.continuous_commitment_points - plan_start_point
+                if plan_committed
+                else self.settings.continuous_execute_points
             )
             point_count = min(
                 self.settings.continuous_execute_points, remaining_points
@@ -560,6 +628,7 @@ class Runner:
                 chunk_index=self.completed_chunks,
                 plan_start_point=plan_start_point,
                 selected_point_count=point_count,
+                plan_committed=plan_committed,
                 cumulative_runtime_s=self.clock() - started_s,
             )
             for point in range(plan_start_point, plan_start_point + point_count):
@@ -607,15 +676,26 @@ class Runner:
             candidate = self._infer_action(next_request_id)
             next_request_id += 1
             next_plan_start = plan_start_point + point_count
-            if next_plan_start >= self.settings.continuous_commitment_points:
+            if not plan_committed:
                 self._emit(
-                    "action_plan_committed",
+                    "action_plan_replanned",
                     previous_request_id=plan.request_id,
                     request_id=candidate.request_id,
-                    completed_commitment_points=self.settings.continuous_commitment_points,
                 )
                 plan = candidate
                 plan_start_point = 0
+            elif next_plan_start >= self.settings.continuous_commitment_points:
+                self._emit(
+                    "action_plan_commitment_completed",
+                    request_id=plan.request_id,
+                    completed_commitment_points=(
+                        self.settings.continuous_commitment_points
+                    ),
+                    next_request_id=candidate.request_id,
+                )
+                plan = candidate
+                plan_start_point = 0
+                plan_committed = False
             else:
                 self._emit(
                     "action_plan_candidate",
@@ -911,6 +991,12 @@ def main(argv: list[str] | None = None) -> int:
             continuous_execute_points=int(config["continuous"]["execute_points"]),
             continuous_commitment_points=int(
                 config["continuous"]["commitment_points"]
+            ),
+            continuous_contact_force_threshold_n=float(
+                config["continuous"]["contact_force_threshold_n"]
+            ),
+            continuous_min_upward_exit_m=float(
+                config["continuous"]["min_upward_exit_m"]
             ),
             max_continuous_runtime_s=float(config["continuous"]["max_runtime_s"]),
             orientation_source=str(config["execution"]["orientation_source"]),

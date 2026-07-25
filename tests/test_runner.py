@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from acp_single_pc_deploy.robot.hardware import HOME_JOINTS_DEG
 from acp_single_pc_deploy.robot.client import InferenceTimeout
@@ -126,14 +127,29 @@ def test_continuous_executes_four_points_then_reobserves(fake_components) -> Non
         e for e in fake_components.events if e["type"] == "action_selected_point"
     ]
     assert len(selected) == 4 * len(starts)
-    assert [e["point"] for e in selected[:8]] == list(range(8))
-    assert {e["request_id"] for e in selected[:8]} == {0}
+    assert [e["point"] for e in selected[:8]] == [0, 1, 2, 3] * 2
+    assert [e["request_id"] for e in selected[:8]] == [0] * 4 + [1] * 4
     assert runner.completed_chunks == len(complete)
 
 
-def test_continuous_commits_latest_candidate_after_finishing_active_plan(
+def test_continuous_commits_contact_plan_with_a_clear_upward_exit(
     fake_components,
 ) -> None:
+    original_observe = fake_components.observe
+    original_infer = fake_components.client.infer
+
+    def contact_observe(request_id):
+        packet = original_observe(request_id)
+        packet.wrench[:, 0] = 6.0
+        return packet
+
+    def upward_infer(packet):
+        chunk = original_infer(packet)
+        chunk.virtual_pose7[3, 2] = packet.pose7[-1, 2] + 0.04
+        return chunk
+
+    fake_components.observe = contact_observe
+    fake_components.client.infer = upward_infer
     runner = Runner.for_test(
         "continuous",
         fake_components,
@@ -152,11 +168,45 @@ def test_continuous_commits_latest_candidate_after_finishing_active_plan(
     ]
     assert selected[:4] == [(0, 0), (0, 1), (0, 2), (0, 3)]
     committed = [
-        e for e in fake_components.events if e["type"] == "action_plan_committed"
+        e
+        for e in fake_components.events
+        if e["type"] == "action_plan_commitment_started"
     ]
     assert committed
-    assert committed[0]["previous_request_id"] == 0
-    assert committed[0]["request_id"] == 2
+    assert committed[0]["request_id"] == 0
+    assert committed[0]["contact_force_norm_n"] == 6.0
+    assert committed[0]["upward_exit_m"] == pytest.approx(0.04)
+
+
+def test_continuous_contact_without_upward_exit_keeps_replanning(
+    fake_components,
+) -> None:
+    original_observe = fake_components.observe
+
+    def contact_observe(request_id):
+        packet = original_observe(request_id)
+        packet.wrench[:, 0] = 6.0
+        return packet
+
+    fake_components.observe = contact_observe
+    runner = Runner.for_test(
+        "continuous",
+        fake_components,
+        settings=continuous_settings(max_continuous_runtime_s=0.05),
+    )
+
+    assert runner.run_once() == 0
+    assert not any(
+        e["type"] == "action_plan_commitment_started"
+        for e in fake_components.events
+    )
+    checks = [
+        e
+        for e in fake_components.events
+        if e["type"] == "action_plan_commitment_check"
+    ]
+    assert checks
+    assert all(e["committed"] is False for e in checks)
 
 
 def test_continuous_dry_run_repeats_without_sending_pose(fake_components) -> None:

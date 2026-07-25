@@ -61,6 +61,8 @@ def test_fixed_inference_and_robot_configs() -> None:
     assert robot["execution"]["orientation_source"] == "reference"
     assert robot["continuous"]["execute_points"] == 2
     assert robot["continuous"]["commitment_points"] == 16
+    assert robot["continuous"]["contact_force_threshold_n"] == 5.0
+    assert robot["continuous"]["min_upward_exit_m"] == 0.03
     assert robot["acquisition"]["pose_sample_period_s"] == 0.01007
     assert robot["acquisition"]["wrench_sample_period_s"] == 0.005263
     assert robot["continuous"]["max_runtime_s"] == 120.0
@@ -103,6 +105,18 @@ def test_runner_settings_reject_commitment_shorter_than_execution_window() -> No
             continuous_execute_points=4,
             continuous_commitment_points=2,
         )
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "continuous_contact_force_threshold_n",
+        "continuous_min_upward_exit_m",
+    ),
+)
+def test_runner_settings_reject_nonpositive_commitment_thresholds(field) -> None:
+    with pytest.raises(ValueError, match=field):
+        RunnerSettings(**{field: 0.0})
 
 
 def test_launcher_uses_fixed_checkpoint_and_conda_environments() -> None:
