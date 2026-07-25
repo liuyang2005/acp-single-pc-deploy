@@ -52,6 +52,7 @@ execution:
 
 continuous:
   execute_points: 2
+  commitment_points: 16
   max_runtime_s: 120.0
   max_equivalent_target_distance_m: 0.20
   workspace_min_xyz_m: [0.55, -0.14, 0.04]

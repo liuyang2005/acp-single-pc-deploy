@@ -126,7 +126,37 @@ def test_continuous_executes_four_points_then_reobserves(fake_components) -> Non
         e for e in fake_components.events if e["type"] == "action_selected_point"
     ]
     assert len(selected) == 4 * len(starts)
+    assert [e["point"] for e in selected[:8]] == list(range(8))
+    assert {e["request_id"] for e in selected[:8]} == {0}
     assert runner.completed_chunks == len(complete)
+
+
+def test_continuous_commits_latest_candidate_after_finishing_active_plan(
+    fake_components,
+) -> None:
+    runner = Runner.for_test(
+        "continuous",
+        fake_components,
+        settings=continuous_settings(
+            continuous_execute_points=2,
+            continuous_commitment_points=4,
+            max_continuous_runtime_s=0.1,
+        ),
+    )
+
+    assert runner.run_once() == 0
+    selected = [
+        (e["request_id"], e["point"])
+        for e in fake_components.events
+        if e["type"] == "action_selected_point"
+    ]
+    assert selected[:4] == [(0, 0), (0, 1), (0, 2), (0, 3)]
+    committed = [
+        e for e in fake_components.events if e["type"] == "action_plan_committed"
+    ]
+    assert committed
+    assert committed[0]["previous_request_id"] == 0
+    assert committed[0]["request_id"] == 2
 
 
 def test_continuous_dry_run_repeats_without_sending_pose(fake_components) -> None:

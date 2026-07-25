@@ -42,6 +42,7 @@ class RunnerSettings:
     execute_points: int = 4
     control_period_s: float = 0.005
     continuous_execute_points: int = 2
+    continuous_commitment_points: int = EXPECTED_CONTRACT.action_horizon
     max_continuous_runtime_s: float = 120.0
     orientation_source: str = "reference"
     expected_camera_view: str = "wrist"
@@ -51,6 +52,15 @@ class RunnerSettings:
             raise ValueError("execute_points must be within the action horizon")
         if not 1 <= self.continuous_execute_points <= EXPECTED_CONTRACT.action_horizon:
             raise ValueError("continuous_execute_points must be within the action horizon")
+        if not (
+            self.continuous_execute_points
+            <= self.continuous_commitment_points
+            <= EXPECTED_CONTRACT.action_horizon
+        ):
+            raise ValueError(
+                "continuous_commitment_points must be between "
+                "continuous_execute_points and the action horizon"
+            )
         if self.orientation_source not in {"reference", "virtual", "current"}:
             raise ValueError("orientation_source must be reference, virtual, or current")
         if self.expected_camera_view not in {"wrist", "main"}:
@@ -400,6 +410,7 @@ class Runner:
         self,
         chunk: Any,
         execute_points: int | None = None,
+        start_point: int = 0,
         deadline_s: float | None = None,
     ) -> bool:
         state = self.hardware.read_state()
@@ -413,6 +424,7 @@ class Runner:
             execute_points=point_count,
             inner_stiffness=self.safety.limits.inner_translation_stiffness_n_m,
             orientation_source=self.settings.orientation_source,
+            start_point=start_point,
         )
         while True:
             now = self.clock()
@@ -446,6 +458,7 @@ class Runner:
         self,
         chunk: Any,
         execute_points: int | None = None,
+        start_point: int = 0,
         deadline_s: float | None = None,
     ) -> bool:
         state = self.hardware.read_state()
@@ -462,15 +475,17 @@ class Runner:
             execute_points=point_count,
             inner_stiffness=self.safety.limits.inner_translation_stiffness_n_m,
             orientation_source=self.settings.orientation_source,
+            start_point=start_point,
         )
         preview_pose = np.asarray(state.pose7, dtype=np.float64).copy()
         translation_limit_count = 0
         rotation_limit_count = 0
         completed_points = 0
-        for point in range(point_count):
+        for local_point in range(point_count):
             if deadline_s is not None and self.clock() >= deadline_s:
                 return False
-            preview_time = start_time + point * chunk.action_period_s
+            point = start_point + local_point
+            preview_time = start_time + local_point * chunk.action_period_s
             command = executor.command_at(preview_time, preview_pose, self.safety)
             messages = set(command.safety_messages)
             translation_limit_count += int("translation_step" in messages)
@@ -508,6 +523,7 @@ class Runner:
             "continuous_start",
             max_runtime_s=self.settings.max_continuous_runtime_s,
             execute_points=self.settings.continuous_execute_points,
+            commitment_points=self.settings.continuous_commitment_points,
         )
 
     def _emit_continuous_stop(self) -> None:
@@ -527,37 +543,48 @@ class Runner:
         assert self._continuous_deadline_s is not None
         started_s = self._continuous_started_s
         deadline_s = self._continuous_deadline_s
-        request_id = first_chunk.request_id
-        chunk = first_chunk
+        next_request_id = first_chunk.request_id + 1
+        plan = first_chunk
+        plan_start_point = 0
         self._transition(DeploymentState.RUNNING, "continuous policy loop started")
         while self.clock() < deadline_s:
+            remaining_points = (
+                self.settings.continuous_commitment_points - plan_start_point
+            )
+            point_count = min(
+                self.settings.continuous_execute_points, remaining_points
+            )
             self._emit(
                 "chunk_start",
-                request_id=request_id,
+                request_id=plan.request_id,
                 chunk_index=self.completed_chunks,
+                plan_start_point=plan_start_point,
+                selected_point_count=point_count,
                 cumulative_runtime_s=self.clock() - started_s,
             )
-            for point in range(self.settings.continuous_execute_points):
+            for point in range(plan_start_point, plan_start_point + point_count):
                 self._emit(
                     "action_selected_point",
-                    request_id=request_id,
+                    request_id=plan.request_id,
                     point=point,
-                    reference_pose7=chunk.reference_pose7[point],
-                    virtual_pose7=chunk.virtual_pose7[point],
-                    stiffness=chunk.stiffness[point],
+                    reference_pose7=plan.reference_pose7[point],
+                    virtual_pose7=plan.virtual_pose7[point],
+                    stiffness=plan.stiffness[point],
                 )
             if self.mode == "continuous-dry-run":
                 completed = self._preview(
-                    chunk,
-                    execute_points=self.settings.continuous_execute_points,
+                    plan,
+                    execute_points=point_count,
+                    start_point=plan_start_point,
                     deadline_s=deadline_s,
                 )
                 command_count = 0
             else:
                 before = self.completed_steps
                 completed = self._execute(
-                    chunk,
-                    execute_points=self.settings.continuous_execute_points,
+                    plan,
+                    execute_points=point_count,
+                    start_point=plan_start_point,
                     deadline_s=deadline_s,
                 )
                 command_count = self.completed_steps - before
@@ -566,18 +593,37 @@ class Runner:
             self.completed_chunks += 1
             self._emit(
                 "chunk_complete",
-                request_id=request_id,
+                request_id=plan.request_id,
                 chunk_index=self.completed_chunks - 1,
-                selected_point_count=self.settings.continuous_execute_points,
+                plan_start_point=plan_start_point,
+                selected_point_count=point_count,
                 command_count=command_count,
-                inference_latency_s=chunk.inference_latency_s,
-                action_period_s=chunk.action_period_s,
+                inference_latency_s=plan.inference_latency_s,
+                action_period_s=plan.action_period_s,
                 cumulative_runtime_s=self.clock() - started_s,
             )
-            request_id += 1
             if self.clock() >= deadline_s:
                 break
-            chunk = self._infer_action(request_id)
+            candidate = self._infer_action(next_request_id)
+            next_request_id += 1
+            next_plan_start = plan_start_point + point_count
+            if next_plan_start >= self.settings.continuous_commitment_points:
+                self._emit(
+                    "action_plan_committed",
+                    previous_request_id=plan.request_id,
+                    request_id=candidate.request_id,
+                    completed_commitment_points=self.settings.continuous_commitment_points,
+                )
+                plan = candidate
+                plan_start_point = 0
+            else:
+                self._emit(
+                    "action_plan_candidate",
+                    request_id=candidate.request_id,
+                    active_request_id=plan.request_id,
+                    next_plan_start_point=next_plan_start,
+                )
+                plan_start_point = next_plan_start
         self.stop_reason = "runtime_limit_reached"
         self._emit_continuous_stop()
         self._transition(DeploymentState.HOLD, self.stop_reason)
@@ -863,6 +909,9 @@ def main(argv: list[str] | None = None) -> int:
             execute_points=int(config["execution"]["execute_points"]),
             control_period_s=float(config["execution"]["control_period_s"]),
             continuous_execute_points=int(config["continuous"]["execute_points"]),
+            continuous_commitment_points=int(
+                config["continuous"]["commitment_points"]
+            ),
             max_continuous_runtime_s=float(config["continuous"]["max_runtime_s"]),
             orientation_source=str(config["execution"]["orientation_source"]),
             expected_camera_view=str(camera["view"]),

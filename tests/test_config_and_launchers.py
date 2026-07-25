@@ -60,6 +60,7 @@ def test_fixed_inference_and_robot_configs() -> None:
     assert robot["execution"]["execute_points"] == 4
     assert robot["execution"]["orientation_source"] == "reference"
     assert robot["continuous"]["execute_points"] == 2
+    assert robot["continuous"]["commitment_points"] == 16
     assert robot["acquisition"]["pose_sample_period_s"] == 0.01007
     assert robot["acquisition"]["wrench_sample_period_s"] == 0.005263
     assert robot["continuous"]["max_runtime_s"] == 120.0
@@ -94,6 +95,14 @@ def test_continuous_config_rejects_inverted_workspace() -> None:
 def test_runner_settings_reject_invalid_continuous_point_count() -> None:
     with pytest.raises(ValueError, match="continuous_execute_points"):
         RunnerSettings(continuous_execute_points=0)
+
+
+def test_runner_settings_reject_commitment_shorter_than_execution_window() -> None:
+    with pytest.raises(ValueError, match="continuous_commitment_points"):
+        RunnerSettings(
+            continuous_execute_points=4,
+            continuous_commitment_points=2,
+        )
 
 
 def test_launcher_uses_fixed_checkpoint_and_conda_environments() -> None:

@@ -31,8 +31,10 @@ The deployment now:
 - targets about 333 ms RGB, 101 ms pose, and 163 ms wrench histories;
 - records robot state continuously inside the 200 Hz execution loop;
 - rejects missing history instead of silently accepting a time gap;
-- executes two points per continuous replan and four points in guarded
-  single-chunk mode;
+- reobserves and replans every two continuous points, but preserves the active
+  16-point plan until points 0 through 15 have been consumed; this prevents
+  repeated execution of only the descending action prefix;
+- executes four points in guarded single-chunk mode;
 - uses reference orientation for the translation-only compliance labels;
 - reports sample timestamps and history spans in each observation log.
 

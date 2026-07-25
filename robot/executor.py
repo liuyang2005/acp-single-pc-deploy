@@ -62,10 +62,15 @@ class ActionChunkExecutor:
         execute_points: int,
         inner_stiffness: float,
         orientation_source: str = "reference",
+        start_point: int = 0,
     ) -> None:
         chunk.validate(EXPECTED_CONTRACT)
         if not 1 <= execute_points <= EXPECTED_CONTRACT.action_horizon:
             raise ValueError("execute_points must be within the action horizon")
+        if not 0 <= start_point < EXPECTED_CONTRACT.action_horizon:
+            raise ValueError("start_point must be within the action horizon")
+        if start_point + execute_points > EXPECTED_CONTRACT.action_horizon:
+            raise ValueError("execution window must be within the action horizon")
         if not np.isfinite(start_time_s):
             raise ValueError("start_time_s must be finite")
         if not np.isfinite(inner_stiffness) or inner_stiffness <= 0.0:
@@ -75,6 +80,7 @@ class ActionChunkExecutor:
         self.chunk = chunk
         self.start_time_s = float(start_time_s)
         self.execute_points = execute_points
+        self.start_point = start_point
         self.inner_stiffness = float(inner_stiffness)
         self.orientation_source = orientation_source
         self.end_time_s = self.start_time_s + execute_points * chunk.action_period_s
@@ -98,9 +104,11 @@ class ActionChunkExecutor:
         if self.expired(now):
             raise RuntimeError("action execution window expired")
         offset = (now - self.start_time_s) / self.chunk.action_period_s
-        left = min(int(np.floor(offset)), self.execute_points - 1)
-        right = min(left + 1, self.execute_points - 1)
-        fraction = float(np.clip(offset - left, 0.0, 1.0))
+        local_left = min(int(np.floor(offset)), self.execute_points - 1)
+        local_right = min(local_left + 1, self.execute_points - 1)
+        left = self.start_point + local_left
+        right = self.start_point + local_right
+        fraction = float(np.clip(offset - local_left, 0.0, 1.0))
         reference = slerp_pose7(self.chunk.reference_pose7[left], self.chunk.reference_pose7[right], fraction)
         virtual = slerp_pose7(self.chunk.virtual_pose7[left], self.chunk.virtual_pose7[right], fraction)
         predicted = float(

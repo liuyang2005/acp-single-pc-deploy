@@ -52,6 +52,39 @@ def test_execute_points_cannot_exceed_action_horizon() -> None:
         ActionChunkExecutor(make_action(), 0.0, execute_points=17, inner_stiffness=5000.0)
 
 
+def test_executor_can_continue_from_a_later_action_point() -> None:
+    chunk = make_action()
+    chunk.reference_pose7[:, 0] = np.arange(16) * 0.001
+    chunk.virtual_pose7[:, 0] = np.arange(16) * 0.001
+    supervisor = SafetySupervisor(SafetyLimits.defaults())
+    current = np.array([0, 0, 0, 1, 0, 0, 0], dtype=float)
+    supervisor.latch_start_pose(current)
+    executor = ActionChunkExecutor(
+        chunk,
+        start_time_s=0.0,
+        execute_points=2,
+        inner_stiffness=5000.0,
+        start_point=12,
+    )
+
+    first = executor.command_at(0.0, current, supervisor)
+    second = executor.command_at(chunk.action_period_s, current, supervisor)
+
+    assert first.virtual_pose7[0] == pytest.approx(0.012)
+    assert second.virtual_pose7[0] == pytest.approx(0.013)
+
+
+def test_executor_rejects_a_window_past_the_action_horizon() -> None:
+    with pytest.raises(ValueError, match="execution window"):
+        ActionChunkExecutor(
+            make_action(),
+            0.0,
+            execute_points=2,
+            inner_stiffness=5000.0,
+            start_point=15,
+        )
+
+
 def test_executor_uses_reference_orientation_for_translation_only_compliance() -> None:
     chunk = make_action()
     chunk.reference_pose7[:, 3:] = np.array([1.0, 0.0, 0.0, 0.0])
