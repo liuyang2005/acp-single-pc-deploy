@@ -33,14 +33,17 @@ def test_fixed_inference_and_robot_configs() -> None:
     robot = load_yaml_mapping(ROOT / "configs" / "robot.yaml")
     assert inference["network"]["bind_endpoint"] == "tcp://127.0.0.1:5555"
     assert inference["model"]["device"] == "cuda:0"
-    assert inference["model"]["raw_time_step_s"] == 0.002
-    assert inference["model"]["slow_down_factor"] == 1.5
+    assert inference["model"]["action_period_s"] == 0.5035
+    assert inference["model"]["inference_seed"] == 42
+    assert inference["model"]["expected_camera_view"] == "wrist"
+    assert inference["model"]["minimum_checkpoint_epoch"] == 700
     assert robot["network"]["inference_endpoint"] == "tcp://127.0.0.1:5555"
     assert robot["robot"]["serial"] == "Rizon4s-063586"
     assert robot["robot"]["tool"] == "hapticexoteleop"
     assert robot["robot"]["home_joints_deg"] == [0, -32, 0, 90, 0, 28, 45]
     assert robot["camera"]["serial"] == "260322274925"
     assert robot["camera"]["dataset_name"] == "cam_260322274925_wrist"
+    assert robot["camera"]["view"] == "wrist"
     assert robot["camera"]["color_order"] == "RGB"
     assert robot["camera"]["frame_timeout_ms"] == 15000
     assert robot["camera"]["start_attempts"] == 2
@@ -54,8 +57,11 @@ def test_fixed_inference_and_robot_configs() -> None:
         robot["safety"]["stiffness_max_n_m"]
         <= robot["execution"]["inner_translation_stiffness_n_m"]
     )
-    assert robot["execution"]["execute_points"] == 12
-    assert robot["continuous"]["execute_points"] == 4
+    assert robot["execution"]["execute_points"] == 4
+    assert robot["execution"]["orientation_source"] == "reference"
+    assert robot["continuous"]["execute_points"] == 2
+    assert robot["acquisition"]["pose_sample_period_s"] == 0.01007
+    assert robot["acquisition"]["wrench_sample_period_s"] == 0.005263
     assert robot["continuous"]["max_runtime_s"] == 120.0
     assert robot["continuous"]["workspace_min_xyz_m"] == [0.55, -0.14, 0.04]
     assert robot["continuous"]["workspace_max_xyz_m"] == [0.92, 0.13, 0.43]
@@ -97,7 +103,11 @@ def test_launcher_uses_fixed_checkpoint_and_conda_environments() -> None:
     assert 'ACP_ENV="pyrite"' in combined_script
     assert 'ROBOT_ENV="haptic_exo_env"' in combined_script
     assert (
-        'CHECKPOINT_PATH="${HOME}/haptic_exo_teleop_ws/liuyang/acp_checkpoints/latest.ckpt"'
+        'CHECKPOINT_PATH="${ACP_CHECKPOINT_PATH:-${DEFAULT_CHECKPOINT_PATH}}"'
+        in combined_script
+    )
+    assert (
+        'DEFAULT_CHECKPOINT_PATH="${HOME}/haptic_exo_teleop_ws/liuyang/Data/acp_checkpoints/2026.07.25_14.19.52_flip_up_new_conv_wrist_190hz_800ep/checkpoints/latest.ckpt"'
         in combined_script
     )
     assert (
@@ -106,6 +116,8 @@ def test_launcher_uses_fixed_checkpoint_and_conda_environments() -> None:
         in combined_script
     )
     assert "${2:?" not in combined_script
+    assert 'REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"' in combined_script
+    assert "/acp_single_pc_deploy/run_" not in combined_script
     assert '[[ ! -f "${CHECKPOINT_PATH}" ]]' in combined_script
     assert "conda run" in combined_script
     assert "--health" in combined_script

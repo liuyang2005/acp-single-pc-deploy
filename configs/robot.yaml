@@ -16,6 +16,7 @@ robot:
 camera:
   serial: "260322274925"
   dataset_name: cam_260322274925_wrist
+  view: wrist
   width: 640
   height: 480
   fps: 30
@@ -31,11 +32,15 @@ acquisition:
   robot_state_hz: 500
   buffer_capacity: 4096
   warmup_timeout_s: 8.0
+  pose_sample_period_s: 0.01007
+  wrench_sample_period_s: 0.005263
+  max_sample_time_error_factor: 0.75
   baseline_duration_s: 2.0
   baseline_sample_period_s: 0.005
 
 execution:
-  execute_points: 12
+  execute_points: 4
+  orientation_source: reference
   control_period_s: 0.005
   inner_translation_stiffness_n_m: 5000.0
   inner_rotation_stiffness_nm_rad: 100.0
@@ -46,7 +51,7 @@ execution:
   max_angular_acceleration_rad_s2: 0.05
 
 continuous:
-  execute_points: 4
+  execute_points: 2
   max_runtime_s: 120.0
   max_equivalent_target_distance_m: 0.20
   workspace_min_xyz_m: [0.55, -0.14, 0.04]
@@ -68,5 +73,5 @@ safety:
   max_wrench_age_s: 0.05
 
 logging:
-  root: acp_single_pc_deploy/logs/robot
+  root: logs/robot
   dry_run_frame_interval_s: 1.0

@@ -2,10 +2,12 @@ network:
   bind_endpoint: tcp://127.0.0.1:5555
 
 model:
-  acp_root: adaptive_compliance_policy
+  acp_root: ../adaptive_compliance_policy
   device: cuda:0
-  raw_time_step_s: 0.002
-  slow_down_factor: 1.5
+  action_period_s: 0.5035
+  inference_seed: 42
+  expected_camera_view: wrist
+  minimum_checkpoint_epoch: 700
 
 logging:
-  root: acp_single_pc_deploy/logs/inference
+  root: logs/inference

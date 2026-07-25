@@ -119,15 +119,30 @@ def contract_from_shape_meta(shape_meta: Mapping[str, Any]) -> ModelContract:
     return contract
 
 
+def _camera_view_from_checkpoint_name(name: str) -> str:
+    normalized = name.lower()
+    if "wrist" in normalized:
+        return "wrist"
+    if "main" in normalized:
+        return "main"
+    raise SchemaError(
+        f"checkpoint name {name!r} does not identify a wrist or main camera model"
+    )
+
+
 @dataclass(frozen=True)
 class ACPPolicyAdapter:
     contract: ModelContract
     action_period_s: float
+    checkpoint_name: str
+    checkpoint_epoch: int
+    checkpoint_camera_view: str
     _policy: Any
     _prepare_observation: Callable[[ObservationPacket], tuple[Any, Any]]
     _extract_action: Callable[[Any], np.ndarray]
     _postprocess_action: Callable[[np.ndarray, Any], tuple[np.ndarray, np.ndarray, np.ndarray]]
     _inference_context: Callable[[], AbstractContextManager[Any]]
+    _seed_inference: Callable[[], None]
 
     @classmethod
     def for_test(
@@ -137,15 +152,22 @@ class ACPPolicyAdapter:
         extract_action: Callable[[Any], np.ndarray],
         postprocess_action: Callable[[np.ndarray, Any], tuple[np.ndarray, np.ndarray, np.ndarray]],
         action_period_s: float,
+        checkpoint_name: str = "test_wrist",
+        checkpoint_epoch: int = 999,
+        checkpoint_camera_view: str = "wrist",
     ) -> ACPPolicyAdapter:
         return cls(
             contract=EXPECTED_CONTRACT,
             action_period_s=float(action_period_s),
+            checkpoint_name=checkpoint_name,
+            checkpoint_epoch=int(checkpoint_epoch),
+            checkpoint_camera_view=checkpoint_camera_view,
             _policy=policy,
             _prepare_observation=prepare_observation,
             _extract_action=extract_action,
             _postprocess_action=postprocess_action,
             _inference_context=nullcontext,
+            _seed_inference=lambda: None,
         )
 
     @classmethod
@@ -154,25 +176,55 @@ class ACPPolicyAdapter:
         acp_root: str | Path,
         checkpoint: str | Path,
         device: str,
-        raw_time_step_s: float,
-        slow_down_factor: float,
+        action_period_s: float,
+        inference_seed: int,
+        expected_camera_view: str,
+        minimum_checkpoint_epoch: int,
     ) -> ACPPolicyAdapter:
         add_acp_import_paths(acp_root)
         checkpoint_path = resolve_checkpoint_path(checkpoint)
-        if raw_time_step_s <= 0.0 or slow_down_factor <= 0.0:
-            raise ValueError("raw_time_step_s and slow_down_factor must be positive")
+        if action_period_s <= 0.0:
+            raise ValueError("action_period_s must be positive")
+        if expected_camera_view not in {"wrist", "main"}:
+            raise ValueError("expected_camera_view must be wrist or main")
+        if minimum_checkpoint_epoch < 0:
+            raise ValueError("minimum_checkpoint_epoch must be nonnegative")
 
+        import dill
+        import hydra
         import torch
         from PyriteConfig.tasks.common.common_type_conversions import (
             action19_postprocess,
             sparse_obs_to_obs_sample,
         )
-        from PyriteUtility.pytorch_utils.model_io import load_policy
+        from PyriteML.diffusion_policy.workspace.base_workspace import BaseWorkspace
         from PyriteUtility.spatial_math import spatial_utilities as su
 
-        policy, shape_meta = load_policy(str(checkpoint_path), device)
+        payload = torch.load(
+            checkpoint_path.open("rb"), map_location="cpu", pickle_module=dill
+        )
+        cfg = payload["cfg"]
+        checkpoint_name = str(cfg.name)
+        checkpoint_camera_view = _camera_view_from_checkpoint_name(checkpoint_name)
+        checkpoint_epoch = int(dill.loads(payload["pickles"]["epoch"]))
+        if checkpoint_camera_view != expected_camera_view:
+            raise SchemaError(
+                f"checkpoint camera view is {checkpoint_camera_view}, expected {expected_camera_view}"
+            )
+        if checkpoint_epoch < minimum_checkpoint_epoch:
+            raise SchemaError(
+                f"checkpoint epoch {checkpoint_epoch} is below required minimum "
+                f"{minimum_checkpoint_epoch}"
+            )
+        workspace_cls = hydra.utils.get_class(cfg._target_)
+        workspace: BaseWorkspace = workspace_cls(cfg)
+        workspace.load_payload(payload, exclude_keys=None, include_keys=None)
+        policy = workspace.ema_model if cfg.training.use_ema else workspace.model
+        policy.num_inference_steps = cfg.policy.num_inference_steps
+        policy.eval().to(device)
+        policy.reset()
+        shape_meta = cfg.task.shape_meta
         contract = contract_from_shape_meta(shape_meta)
-        action_period_s = contract.action_stride * raw_time_step_s * slow_down_factor
 
         def prepare(packet: ObservationPacket) -> tuple[Any, Any]:
             pose9 = su.SE3_to_pose9(su.pose7_to_SE3(packet.pose7))
@@ -212,20 +264,30 @@ class ACPPolicyAdapter:
             virtual = su.SE3_to_pose7(np.asarray(virtual_se3[0]))
             return reference, virtual, np.asarray(stiffness[0], dtype=np.float64)
 
+        def seed_inference() -> None:
+            torch.manual_seed(int(inference_seed))
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(int(inference_seed))
+
         return cls(
             contract=contract,
             action_period_s=float(action_period_s),
+            checkpoint_name=checkpoint_name,
+            checkpoint_epoch=checkpoint_epoch,
+            checkpoint_camera_view=checkpoint_camera_view,
             _policy=policy,
             _prepare_observation=prepare,
             _extract_action=extract,
             _postprocess_action=postprocess,
             _inference_context=torch.inference_mode,
+            _seed_inference=seed_inference,
         )
 
     def infer(self, packet: ObservationPacket) -> ActionChunk:
         packet.validate(self.contract)
         started = time.perf_counter()
         policy_input, context = self._prepare_observation(packet)
+        self._seed_inference()
         with self._inference_context():
             result = self._policy.predict_action(policy_input)
         action = np.asarray(self._extract_action(result), dtype=np.float64)

@@ -32,6 +32,9 @@ class InferenceService:
                         "checkpoint_sha256": self.checkpoint_sha256,
                         "contract": self.adapter.contract.to_dict(),
                         "action_period_s": self.adapter.action_period_s,
+                        "checkpoint_name": self.adapter.checkpoint_name,
+                        "checkpoint_epoch": self.adapter.checkpoint_epoch,
+                        "checkpoint_camera_view": self.adapter.checkpoint_camera_view,
                         "color_order": "RGB",
                         "image_shape": [224, 224, 3],
                     },
@@ -102,8 +105,10 @@ def main(argv: list[str] | None = None) -> int:
             acp_root=model["acp_root"],
             checkpoint=checkpoint,
             device=model["device"],
-            raw_time_step_s=float(model["raw_time_step_s"]),
-            slow_down_factor=float(model["slow_down_factor"]),
+            action_period_s=float(model["action_period_s"]),
+            inference_seed=int(model["inference_seed"]),
+            expected_camera_view=str(model["expected_camera_view"]),
+            minimum_checkpoint_epoch=int(model["minimum_checkpoint_epoch"]),
         )
         service = InferenceService(adapter, file_sha256(checkpoint))
         stop_event = threading.Event()

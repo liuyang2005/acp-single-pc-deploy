@@ -10,7 +10,10 @@ from acp_single_pc_deploy.tests.test_common import make_action, make_observation
 
 class FakeAdapter:
     contract = EXPECTED_CONTRACT
-    action_period_s = 0.15
+    action_period_s = 0.5035
+    checkpoint_name = "test_wrist"
+    checkpoint_epoch = 999
+    checkpoint_camera_view = "wrist"
 
     def infer(self, packet):
         return make_action(packet.request_id)
@@ -23,6 +26,8 @@ def test_handshake_exposes_checkpoint_and_contract() -> None:
     assert metadata["type"] == "handshake_ok"
     assert metadata["checkpoint_sha256"] == "abc123"
     assert metadata["contract"] == EXPECTED_CONTRACT.to_dict()
+    assert metadata["checkpoint_camera_view"] == "wrist"
+    assert metadata["checkpoint_epoch"] == 999
 
 
 def test_inference_response_preserves_request_id() -> None:

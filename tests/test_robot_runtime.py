@@ -23,6 +23,8 @@ def _runtime(camera_factory, **overrides) -> RobotObservationRuntime:
         "robot_state_hz": 1000.0,
         "warmup_timeout_s": 1.0,
         "max_age_s": {"rgb": 0.2, "pose": 0.05, "wrench": 0.05},
+        "source_period_s": {"rgb": 0.01, "pose": 0.001, "wrench": 0.001},
+        "max_sample_time_error_factor": 0.75,
     }
     settings.update(overrides)
     return RobotObservationRuntime(**settings)
@@ -154,6 +156,8 @@ def test_observation_runtime_appends_pose_and_wrench_histories() -> None:
         robot_state_hz=1000.0,
         warmup_timeout_s=1.0,
         max_age_s={"rgb": 0.2, "pose": 0.05, "wrench": 0.05},
+        source_period_s={"rgb": 0.01, "pose": 0.001, "wrench": 0.001},
+        max_sample_time_error_factor=0.75,
     )
     runtime._thread = object()
     latest = time.monotonic()
@@ -162,6 +166,12 @@ def test_observation_runtime_appends_pose_and_wrench_histories() -> None:
             latest - (10 - index) * 0.01,
             np.zeros((224, 224, 3), dtype=np.uint8),
         )
+
+    pose = np.array([0, 0, 0, 1, 0, 0, 0], dtype=np.float64)
+    for index in range(33):
+        timestamp = latest - (32 - index) * 0.001
+        runtime.pose_buffer.append(timestamp, pose)
+        runtime.wrench_buffer.append(timestamp, np.zeros(6, dtype=np.float64))
 
     packet = runtime.observe(request_id=3)
 

@@ -29,23 +29,48 @@ class TimedRingBuffer:
                 raise ValueError("timestamps must be strictly increasing")
             self._items.append((timestamp, array))
 
-    def sample_latest(
+    def sample_at_times(
         self,
-        horizon: int,
-        stride: int,
+        target_times_s: np.ndarray,
         now_s: float,
         max_age_s: float,
+        max_time_error_s: float,
     ) -> tuple[np.ndarray, np.ndarray]:
-        if horizon <= 0 or stride <= 0:
-            raise ValueError("horizon and stride must be positive")
-        required = (horizon - 1) * stride + 1
+        targets = np.asarray(target_times_s, dtype=np.float64)
+        if (
+            targets.ndim != 1
+            or targets.size == 0
+            or not np.all(np.isfinite(targets))
+            or np.any(np.diff(targets) <= 0.0)
+        ):
+            raise ValueError("target times must be a finite, strictly increasing vector")
+        if max_time_error_s <= 0.0:
+            raise ValueError("max_time_error_s must be positive")
         with self._lock:
             items = list(self._items)
-        if len(items) < required:
-            raise BufferNotReady(f"need {required} samples, have {len(items)}")
-        selected = items[-required::stride]
-        timestamps = np.asarray([item[0] for item in selected], dtype=np.float64)
-        values = np.stack([item[1] for item in selected])
+        if not items:
+            raise BufferNotReady("buffer is empty")
+        available_times = np.asarray([item[0] for item in items], dtype=np.float64)
+        selected_indices: list[int] = []
+        for target in targets:
+            insertion = int(np.searchsorted(available_times, target))
+            candidates = [
+                index
+                for index in (insertion - 1, insertion)
+                if 0 <= index < available_times.size
+            ]
+            selected = min(candidates, key=lambda index: abs(available_times[index] - target))
+            error = abs(float(available_times[selected] - target))
+            if error > max_time_error_s:
+                raise BufferNotReady(
+                    f"no sample near target {target:.6f}s: error={error:.6f}s "
+                    f"limit={max_time_error_s:.6f}s"
+                )
+            selected_indices.append(selected)
+        if len(set(selected_indices)) != len(selected_indices):
+            raise BufferNotReady("target times resolved to duplicate samples")
+        timestamps = available_times[selected_indices]
+        values = np.stack([items[index][1] for index in selected_indices])
         age = float(now_s) - float(timestamps[-1])
         if age < 0.0:
             raise BufferNotReady(f"latest sample is in the future by {-age:.6f}s")
@@ -61,6 +86,18 @@ class TimedRingBuffer:
         return timestamp, value.copy()
 
 
+def _target_times(
+    anchor_time_s: float,
+    horizon: int,
+    stride: int,
+    source_period_s: float,
+) -> np.ndarray:
+    if horizon <= 0 or stride <= 0 or source_period_s <= 0.0:
+        raise ValueError("horizon, stride, and source period must be positive")
+    offsets = np.arange(horizon - 1, -1, -1, dtype=np.float64)
+    return float(anchor_time_s) - offsets * float(stride) * float(source_period_s)
+
+
 def build_observation(
     request_id: int,
     contract: ModelContract,
@@ -69,15 +106,42 @@ def build_observation(
     pose_buffer: TimedRingBuffer,
     wrench_buffer: TimedRingBuffer,
     max_age_s: dict[str, float],
+    source_period_s: dict[str, float],
+    max_time_error_s: dict[str, float],
 ) -> ObservationPacket:
-    rgb_ts, rgb = rgb_buffer.sample_latest(
-        contract.rgb_horizon, contract.rgb_stride, now_s, max_age_s["rgb"]
+    anchor_time_s, _ = rgb_buffer.latest()
+    rgb_ts, rgb = rgb_buffer.sample_at_times(
+        _target_times(
+            anchor_time_s,
+            contract.rgb_horizon,
+            contract.rgb_stride,
+            source_period_s["rgb"],
+        ),
+        now_s,
+        max_age_s["rgb"],
+        max_time_error_s["rgb"],
     )
-    pose_ts, pose = pose_buffer.sample_latest(
-        contract.pose_horizon, contract.pose_stride, now_s, max_age_s["pose"]
+    pose_ts, pose = pose_buffer.sample_at_times(
+        _target_times(
+            anchor_time_s,
+            contract.pose_horizon,
+            contract.pose_stride,
+            source_period_s["pose"],
+        ),
+        now_s,
+        max_age_s["pose"],
+        max_time_error_s["pose"],
     )
-    wrench_ts, wrench = wrench_buffer.sample_latest(
-        contract.wrench_horizon, contract.wrench_stride, now_s, max_age_s["wrench"]
+    wrench_ts, wrench = wrench_buffer.sample_at_times(
+        _target_times(
+            anchor_time_s,
+            contract.wrench_horizon,
+            contract.wrench_stride,
+            source_period_s["wrench"],
+        ),
+        now_s,
+        max_age_s["wrench"],
+        max_time_error_s["wrench"],
     )
     packet = ObservationPacket(
         request_id=request_id,

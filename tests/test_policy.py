@@ -4,7 +4,11 @@ import numpy as np
 import pytest
 
 from acp_single_pc_deploy.common.schemas import EXPECTED_CONTRACT, SchemaError
-from acp_single_pc_deploy.inference.policy import ACPPolicyAdapter, contract_from_shape_meta
+from acp_single_pc_deploy.inference.policy import (
+    ACPPolicyAdapter,
+    _camera_view_from_checkpoint_name,
+    contract_from_shape_meta,
+)
 from acp_single_pc_deploy.tests.test_common import make_observation
 
 
@@ -82,3 +86,10 @@ def test_test_adapter_preserves_request_id_and_semantic_shapes() -> None:
     assert chunk.reference_pose7.shape == (16, 7)
     assert chunk.virtual_pose7.shape == (16, 7)
     assert chunk.stiffness.shape == (16,)
+
+
+def test_checkpoint_name_identifies_camera_view() -> None:
+    assert _camera_view_from_checkpoint_name("conv_wrist_190hz") == "wrist"
+    assert _camera_view_from_checkpoint_name("conv_main_190hz") == "main"
+    with pytest.raises(SchemaError, match="does not identify"):
+        _camera_view_from_checkpoint_name("conv_unknown")

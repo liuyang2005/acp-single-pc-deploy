@@ -55,7 +55,13 @@ class FakeClient:
         self.inferred_packets: list[ObservationPacket] = []
 
     def handshake(self):
-        return {"contract": EXPECTED_CONTRACT.to_dict(), "checkpoint_sha256": "a" * 64}
+        return {
+            "contract": EXPECTED_CONTRACT.to_dict(),
+            "checkpoint_sha256": "a" * 64,
+            "checkpoint_camera_view": "wrist",
+            "checkpoint_name": "test_wrist",
+            "checkpoint_epoch": 999,
+        }
 
     def infer(self, packet: ObservationPacket):
         self.inferred_packets.append(packet)

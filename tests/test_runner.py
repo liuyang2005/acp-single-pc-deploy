@@ -39,8 +39,10 @@ def test_dry_run_previews_every_execution_point(fake_components) -> None:
         for event in fake_components.events
         if event["type"] == "action_preview_point"
     ]
-    assert len(points) == runner.settings.execute_points == 12
-    assert [event["point"] for event in points] == list(range(12))
+    assert len(points) == runner.settings.execute_points == 4
+    assert [event["point"] for event in points] == list(
+        range(runner.settings.execute_points)
+    )
     assert fake_components.hardware.policy_pose_commands == []
 
 
@@ -49,7 +51,7 @@ def test_dry_run_fails_when_any_stiffness_is_clipped(fake_components) -> None:
 
     def clipped_infer(packet):
         chunk = original_infer(packet)
-        chunk.stiffness[5] = 5001.0
+        chunk.stiffness[3] = 5001.0
         return chunk
 
     fake_components.client.infer = clipped_infer
@@ -211,3 +213,15 @@ def test_continuous_events_have_one_start_and_stop_summary(fake_components) -> N
     assert stops[0]["completed_chunks"] == runner.completed_chunks
     assert stops[0]["completed_command_steps"] == runner.completed_steps
     assert "cumulative_runtime_s" in stops[0]
+
+
+def test_runner_rejects_checkpoint_for_another_camera_view(fake_components) -> None:
+    fake_components.client.handshake = lambda: {
+        "contract": {},
+        "checkpoint_sha256": "a" * 64,
+        "checkpoint_camera_view": "main",
+    }
+    runner = Runner.for_test("dry-run", fake_components)
+    assert runner.run_once() == 1
+    assert runner.safety.state is DeploymentState.FAULT
+    assert "camera view" in runner.stop_reason

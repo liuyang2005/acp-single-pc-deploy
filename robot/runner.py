@@ -39,16 +39,22 @@ class RunnerSettings:
     home_epsilon_deg: float = 0.5
     baseline_duration_s: float = 2.0
     baseline_sample_period_s: float = 0.005
-    execute_points: int = 12
+    execute_points: int = 4
     control_period_s: float = 0.005
-    continuous_execute_points: int = 4
+    continuous_execute_points: int = 2
     max_continuous_runtime_s: float = 120.0
+    orientation_source: str = "reference"
+    expected_camera_view: str = "wrist"
 
     def __post_init__(self) -> None:
         if not 1 <= self.execute_points <= EXPECTED_CONTRACT.action_horizon:
             raise ValueError("execute_points must be within the action horizon")
         if not 1 <= self.continuous_execute_points <= EXPECTED_CONTRACT.action_horizon:
             raise ValueError("continuous_execute_points must be within the action horizon")
+        if self.orientation_source not in {"reference", "virtual", "current"}:
+            raise ValueError("orientation_source must be reference, virtual, or current")
+        if self.expected_camera_view not in {"wrist", "main"}:
+            raise ValueError("expected_camera_view must be wrist or main")
         if (
             not np.isfinite(self.max_continuous_runtime_s)
             or self.max_continuous_runtime_s <= 0.0
@@ -84,6 +90,8 @@ class RobotObservationRuntime:
         robot_state_hz: float,
         warmup_timeout_s: float,
         max_age_s: dict[str, float],
+        source_period_s: dict[str, float],
+        max_sample_time_error_factor: float,
         camera_start_attempts: int = 2,
         camera_retry_delay_s: float = 1.0,
         camera_start_timeout_s: float = 35.0,
@@ -95,6 +103,19 @@ class RobotObservationRuntime:
         self.robot_period_s = 1.0 / float(robot_state_hz)
         self.warmup_timeout_s = float(warmup_timeout_s)
         self.max_age_s = max_age_s
+        if set(source_period_s) != {"rgb", "pose", "wrench"}:
+            raise ValueError("source periods must contain rgb, pose, and wrench")
+        self.source_period_s = {
+            name: float(period) for name, period in source_period_s.items()
+        }
+        if any(period <= 0.0 for period in self.source_period_s.values()):
+            raise ValueError("source periods must be positive")
+        if max_sample_time_error_factor <= 0.0:
+            raise ValueError("max sample time error factor must be positive")
+        self.max_time_error_s = {
+            name: float(max_sample_time_error_factor) * period
+            for name, period in self.source_period_s.items()
+        }
         self.camera_start_attempts = int(camera_start_attempts)
         self.camera_retry_delay_s = float(camera_retry_delay_s)
         self.camera_start_timeout_s = float(camera_start_timeout_s)
@@ -169,6 +190,10 @@ class RobotObservationRuntime:
                 f"wrist camera worker failed: {type(self._worker_error).__name__}: {self._worker_error}"
             ) from self._worker_error
 
+    def append_robot_state(self, state: Any) -> None:
+        self.pose_buffer.append(state.timestamp_s, state.pose7)
+        self.wrench_buffer.append(state.timestamp_s, state.raw_wrench_tcp)
+
     def observe(self, request_id: int) -> ObservationPacket:
         if self._thread is None:
             raise RuntimeError("observation runtime has not been started")
@@ -178,8 +203,7 @@ class RobotObservationRuntime:
             state = self.hardware.read_state()
             if state.fault or not state.operational:
                 raise SafetyFault("robot became faulted or non-operational during observation warmup")
-            self.pose_buffer.append(state.timestamp_s, state.pose7)
-            self.wrench_buffer.append(state.timestamp_s, state.raw_wrench_tcp)
+            self.append_robot_state(state)
             now = time.monotonic()
             try:
                 return build_observation(
@@ -190,6 +214,8 @@ class RobotObservationRuntime:
                     pose_buffer=self.pose_buffer,
                     wrench_buffer=self.wrench_buffer,
                     max_age_s=self.max_age_s,
+                    source_period_s=self.source_period_s,
+                    max_time_error_s=self.max_time_error_s,
                 )
             except BufferNotReady as exc:
                 if now >= deadline:
@@ -222,6 +248,7 @@ class Runner:
         limits: SafetyLimits | None = None,
         continuous_workspace: ContinuousWorkspaceLimits | None = None,
         event_sink: Callable[[dict[str, Any]], None] | None = None,
+        state_sink: Callable[[Any], None] | None = None,
     ) -> None:
         if mode not in MODES:
             raise ValueError(f"mode must be one of {', '.join(MODES)}")
@@ -242,6 +269,7 @@ class Runner:
             continuous_workspace if is_continuous else None,
         )
         self.event_sink = event_sink or (lambda _event: None)
+        self.state_sink = state_sink or (lambda _state: None)
         self.stop_reason = "not_started"
         self.completed_steps = 0
         self.completed_chunks = 0
@@ -283,6 +311,7 @@ class Runner:
             settings=test_settings,
             continuous_workspace=continuous_workspace,
             event_sink=components.events.append,
+            state_sink=getattr(components, "record_state", None),
         )
 
     def _emit(self, event_type: str, **fields: Any) -> None:
@@ -300,12 +329,16 @@ class Runner:
         self.safety.transition(target, reason)
         self._emit("state_transition", source=source.value, target=target.value, reason=reason)
 
+    def _record_state(self, state: Any) -> None:
+        self.state_sink(state)
+
     def _sample_baseline(self) -> np.ndarray:
         samples: list[np.ndarray] = []
         deadline = self.clock() + self.settings.baseline_duration_s
         while not samples or self.clock() < deadline:
             state = self.hardware.read_state()
             self._validate_robot_state(state)
+            self._record_state(state)
             samples.append(np.asarray(state.raw_wrench_tcp, dtype=np.float64))
             if self.settings.baseline_sample_period_s > 0.0:
                 self.sleep(self.settings.baseline_sample_period_s)
@@ -335,6 +368,11 @@ class Runner:
             raw_wrench=reading.model_wrench,
             delta_wrench=reading.delta_wrench,
             latest_age_s=packet.latest_age_s,
+            sample_timestamps=packet.timestamps,
+            history_span_s={
+                name: float(times[-1] - times[0])
+                for name, times in packet.timestamps.items()
+            },
         )
 
     def _infer_action(self, request_id: int) -> Any:
@@ -366,6 +404,7 @@ class Runner:
     ) -> bool:
         state = self.hardware.read_state()
         self._validate_robot_state(state)
+        self._record_state(state)
         self._latch_chunk_pose(state.pose7)
         point_count = self.settings.execute_points if execute_points is None else execute_points
         executor = ActionChunkExecutor(
@@ -373,6 +412,7 @@ class Runner:
             start_time_s=self.clock(),
             execute_points=point_count,
             inner_stiffness=self.safety.limits.inner_translation_stiffness_n_m,
+            orientation_source=self.settings.orientation_source,
         )
         while True:
             now = self.clock()
@@ -382,6 +422,7 @@ class Runner:
                 return True
             state = self.hardware.read_state()
             self._validate_robot_state(state)
+            self._record_state(state)
             reading = WrenchReading.from_raw(state.raw_wrench_tcp, self._baseline)
             self.safety.validate_wrench(reading)
             command = executor.command_at(now, state.pose7, self.safety)
@@ -409,6 +450,7 @@ class Runner:
     ) -> bool:
         state = self.hardware.read_state()
         self._validate_robot_state(state)
+        self._record_state(state)
         reading = WrenchReading.from_raw(state.raw_wrench_tcp, self._baseline)
         self.safety.validate_wrench(reading)
         self._latch_chunk_pose(state.pose7)
@@ -419,6 +461,7 @@ class Runner:
             start_time_s=start_time,
             execute_points=point_count,
             inner_stiffness=self.safety.limits.inner_translation_stiffness_n_m,
+            orientation_source=self.settings.orientation_source,
         )
         preview_pose = np.asarray(state.pose7, dtype=np.float64).copy()
         translation_limit_count = 0
@@ -562,6 +605,12 @@ class Runner:
                 start_camera()
             self._baseline = self._sample_baseline()
             handshake = self.client.handshake()
+            checkpoint_view = str(handshake.get("checkpoint_camera_view", ""))
+            if checkpoint_view != self.settings.expected_camera_view:
+                raise SafetyFault(
+                    f"checkpoint camera view is {checkpoint_view!r}, expected "
+                    f"{self.settings.expected_camera_view!r}"
+                )
             self.handshake_metadata = dict(handshake)
             self._emit("inference_handshake", response=handshake)
 
@@ -791,6 +840,14 @@ def main(argv: list[str] | None = None) -> int:
                 "pose": limits.max_pose_age_s,
                 "wrench": limits.max_wrench_age_s,
             },
+            source_period_s={
+                "rgb": 1.0 / float(camera["fps"]),
+                "pose": float(acquisition["pose_sample_period_s"]),
+                "wrench": float(acquisition["wrench_sample_period_s"]),
+            },
+            max_sample_time_error_factor=float(
+                acquisition["max_sample_time_error_factor"]
+            ),
             policy_width=int(camera["policy_width"]),
             policy_height=int(camera["policy_height"]),
         )
@@ -807,6 +864,8 @@ def main(argv: list[str] | None = None) -> int:
             control_period_s=float(config["execution"]["control_period_s"]),
             continuous_execute_points=int(config["continuous"]["execute_points"]),
             max_continuous_runtime_s=float(config["continuous"]["max_runtime_s"]),
+            orientation_source=str(config["execution"]["orientation_source"]),
+            expected_camera_view=str(camera["view"]),
         )
         frames_dir = run_dir / "frames"
 
@@ -854,6 +913,7 @@ def main(argv: list[str] | None = None) -> int:
             limits=limits,
             continuous_workspace=continuous_workspace,
             event_sink=event_sink,
+            state_sink=runtime.append_robot_state,
         )
         result = runner.run_once()
     except Exception as exc:

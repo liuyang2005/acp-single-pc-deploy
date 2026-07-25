@@ -50,3 +50,21 @@ def test_executor_never_interpolates_beyond_first_twelve_points() -> None:
 def test_execute_points_cannot_exceed_action_horizon() -> None:
     with pytest.raises(ValueError, match="execute_points"):
         ActionChunkExecutor(make_action(), 0.0, execute_points=17, inner_stiffness=5000.0)
+
+
+def test_executor_uses_reference_orientation_for_translation_only_compliance() -> None:
+    chunk = make_action()
+    chunk.reference_pose7[:, 3:] = np.array([1.0, 0.0, 0.0, 0.0])
+    chunk.virtual_pose7[:, 3:] = np.array([2**-0.5, 0.0, 0.0, 2**-0.5])
+    supervisor = SafetySupervisor(SafetyLimits.defaults())
+    current = np.array([0, 0, 0, 1, 0, 0, 0], dtype=float)
+    supervisor.latch_start_pose(current)
+    executor = ActionChunkExecutor(
+        chunk,
+        start_time_s=0.0,
+        execute_points=2,
+        inner_stiffness=5000.0,
+        orientation_source="reference",
+    )
+    command = executor.command_at(0.0, current, supervisor)
+    np.testing.assert_allclose(command.equivalent_pose7[3:], [1, 0, 0, 0])

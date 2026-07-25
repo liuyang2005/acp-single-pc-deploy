@@ -61,6 +61,7 @@ class ActionChunkExecutor:
         start_time_s: float,
         execute_points: int,
         inner_stiffness: float,
+        orientation_source: str = "reference",
     ) -> None:
         chunk.validate(EXPECTED_CONTRACT)
         if not 1 <= execute_points <= EXPECTED_CONTRACT.action_horizon:
@@ -69,10 +70,13 @@ class ActionChunkExecutor:
             raise ValueError("start_time_s must be finite")
         if not np.isfinite(inner_stiffness) or inner_stiffness <= 0.0:
             raise ValueError("inner_stiffness must be finite and positive")
+        if orientation_source not in {"reference", "virtual", "current"}:
+            raise ValueError("orientation_source must be reference, virtual, or current")
         self.chunk = chunk
         self.start_time_s = float(start_time_s)
         self.execute_points = execute_points
         self.inner_stiffness = float(inner_stiffness)
+        self.orientation_source = orientation_source
         self.end_time_s = self.start_time_s + execute_points * chunk.action_period_s
 
     @property
@@ -109,7 +113,12 @@ class ActionChunkExecutor:
         )
         current = np.asarray(current_pose7, dtype=np.float64)
         equivalent_position = current[:3] + (matrix @ (virtual[:3] - current[:3])) / self.inner_stiffness
-        equivalent = np.concatenate((equivalent_position, virtual[3:]))
+        orientation = {
+            "reference": reference[3:],
+            "virtual": virtual[3:],
+            "current": current[3:],
+        }[self.orientation_source]
+        equivalent = np.concatenate((equivalent_position, orientation))
         applied = safety.limit_pose(equivalent, current)
         messages: list[str] = []
         if clipped:

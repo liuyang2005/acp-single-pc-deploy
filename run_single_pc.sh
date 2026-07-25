@@ -4,7 +4,8 @@ set -euo pipefail
 # Operator settings: edit these three values when moving the deployment.
 ACP_ENV="pyrite"
 ROBOT_ENV="haptic_exo_env"
-CHECKPOINT_PATH="${HOME}/haptic_exo_teleop_ws/liuyang/acp_checkpoints/latest.ckpt"
+DEFAULT_CHECKPOINT_PATH="${HOME}/haptic_exo_teleop_ws/liuyang/Data/acp_checkpoints/2026.07.25_14.19.52_flip_up_new_conv_wrist_190hz_800ep/checkpoints/latest.ckpt"
+CHECKPOINT_PATH="${ACP_CHECKPOINT_PATH:-${DEFAULT_CHECKPOINT_PATH}}"
 
 MODE="${1:?usage: run_single_pc.sh dry-run|execute|continuous-dry-run|continuous}"
 
@@ -19,9 +20,9 @@ if [[ ! -f "${CHECKPOINT_PATH}" ]]; then
   exit 1
 fi
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-INFERENCE_SCRIPT="${ROOT_DIR}/acp_single_pc_deploy/run_inference.sh"
-ROBOT_SCRIPT="${ROOT_DIR}/acp_single_pc_deploy/run_${MODE//-/_}.sh"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INFERENCE_SCRIPT="${REPO_DIR}/run_inference.sh"
+ROBOT_SCRIPT="${REPO_DIR}/run_${MODE//-/_}.sh"
 ENDPOINT="tcp://127.0.0.1:5555"
 INFERENCE_PID=""
 
@@ -33,7 +34,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-cd "${ROOT_DIR}"
+cd "${REPO_DIR}"
 setsid conda run --no-capture-output -n "${ACP_ENV}" \
   bash "${INFERENCE_SCRIPT}" "${CHECKPOINT_PATH}" &
 INFERENCE_PID=$!
