@@ -49,6 +49,8 @@ def test_continuous_timing_header_is_stable() -> None:
         "chunk_index",
         "inference_latency_s",
         "action_period_s",
+        "execution_time_scale",
+        "effective_action_period_s",
         "selected_point_count",
         "command_count",
         "cumulative_runtime_s",

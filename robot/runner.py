@@ -45,6 +45,15 @@ class RunnerSettings:
     continuous_commitment_points: int = EXPECTED_CONTRACT.action_horizon
     continuous_contact_force_threshold_n: float = 5.0
     continuous_min_upward_exit_m: float = 0.03
+    continuous_tracking_speed_utilization: float = 0.8
+    continuous_max_time_scale: float = 6.0
+    continuous_settle_timeout_s: float = 8.0
+    continuous_settle_position_tolerance_m: float = 0.01
+    continuous_settle_rotation_tolerance_rad: float = 0.10
+    max_linear_velocity_m_s: float = 0.02
+    max_linear_acceleration_m_s2: float = 0.05
+    max_angular_velocity_rad_s: float = 0.05
+    max_angular_acceleration_rad_s2: float = 0.05
     max_continuous_runtime_s: float = 120.0
     orientation_source: str = "reference"
     expected_camera_view: str = "wrist"
@@ -77,6 +86,30 @@ class RunnerSettings:
             raise ValueError(
                 "continuous_min_upward_exit_m must be finite and positive"
             )
+        if not (
+            np.isfinite(self.continuous_tracking_speed_utilization)
+            and 0.0 < self.continuous_tracking_speed_utilization <= 1.0
+        ):
+            raise ValueError(
+                "continuous_tracking_speed_utilization must be in (0, 1]"
+            )
+        if (
+            not np.isfinite(self.continuous_max_time_scale)
+            or self.continuous_max_time_scale < 1.0
+        ):
+            raise ValueError("continuous_max_time_scale must be at least 1")
+        for name in (
+            "continuous_settle_timeout_s",
+            "continuous_settle_position_tolerance_m",
+            "continuous_settle_rotation_tolerance_rad",
+            "max_linear_velocity_m_s",
+            "max_linear_acceleration_m_s2",
+            "max_angular_velocity_rad_s",
+            "max_angular_acceleration_rad_s2",
+        ):
+            value = getattr(self, name)
+            if not np.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{name} must be finite and positive")
         if self.orientation_source not in {"reference", "virtual", "current"}:
             raise ValueError("orientation_source must be reference, virtual, or current")
         if self.expected_camera_view not in {"wrist", "main"}:
@@ -101,6 +134,8 @@ def timing_header() -> list[str]:
         "chunk_index",
         "inference_latency_s",
         "action_period_s",
+        "execution_time_scale",
+        "effective_action_period_s",
         "selected_point_count",
         "command_count",
         "cumulative_runtime_s",
@@ -436,6 +471,8 @@ class Runner:
         execute_points: int | None = None,
         start_point: int = 0,
         deadline_s: float | None = None,
+        time_scale: float = 1.0,
+        phase: str = "action",
     ) -> bool:
         state = self.hardware.read_state()
         self._validate_robot_state(state)
@@ -449,6 +486,7 @@ class Runner:
             inner_stiffness=self.safety.limits.inner_translation_stiffness_n_m,
             orientation_source=self.settings.orientation_source,
             start_point=start_point,
+            time_scale=time_scale,
         )
         while True:
             now = self.clock()
@@ -468,10 +506,15 @@ class Runner:
                 "command",
                 request_id=chunk.request_id,
                 step=self.completed_steps,
+                phase=phase,
+                plan_start_point=start_point,
+                execution_time_scale=time_scale,
                 raw_wrench=reading.model_wrench,
                 delta_wrench=reading.delta_wrench,
                 predicted_stiffness=command.predicted_stiffness,
                 applied_stiffness=command.applied_stiffness,
+                reference_pose7=command.reference_pose7,
+                virtual_pose7=command.virtual_pose7,
                 equivalent_pose7=command.equivalent_pose7,
                 applied_pose7=command.applied_pose7,
                 safety_messages=command.safety_messages,
@@ -484,6 +527,7 @@ class Runner:
         execute_points: int | None = None,
         start_point: int = 0,
         deadline_s: float | None = None,
+        time_scale: float = 1.0,
     ) -> bool:
         state = self.hardware.read_state()
         self._validate_robot_state(state)
@@ -500,6 +544,7 @@ class Runner:
             inner_stiffness=self.safety.limits.inner_translation_stiffness_n_m,
             orientation_source=self.settings.orientation_source,
             start_point=start_point,
+            time_scale=time_scale,
         )
         preview_pose = np.asarray(state.pose7, dtype=np.float64).copy()
         translation_limit_count = 0
@@ -509,7 +554,7 @@ class Runner:
             if deadline_s is not None and self.clock() >= deadline_s:
                 return False
             point = start_point + local_point
-            preview_time = start_time + local_point * chunk.action_period_s
+            preview_time = start_time + local_point * executor.action_period_s
             command = executor.command_at(preview_time, preview_pose, self.safety)
             messages = set(command.safety_messages)
             translation_limit_count += int("translation_step" in messages)
@@ -518,6 +563,7 @@ class Runner:
                 "action_preview_point",
                 request_id=chunk.request_id,
                 point=point,
+                execution_time_scale=time_scale,
                 predicted_stiffness=command.predicted_stiffness,
                 applied_stiffness=command.applied_stiffness,
                 equivalent_pose7=command.equivalent_pose7,
@@ -552,6 +598,17 @@ class Runner:
                 self.settings.continuous_contact_force_threshold_n
             ),
             min_upward_exit_m=self.settings.continuous_min_upward_exit_m,
+            tracking_speed_utilization=(
+                self.settings.continuous_tracking_speed_utilization
+            ),
+            max_time_scale=self.settings.continuous_max_time_scale,
+            settle_timeout_s=self.settings.continuous_settle_timeout_s,
+            settle_position_tolerance_m=(
+                self.settings.continuous_settle_position_tolerance_m
+            ),
+            settle_rotation_tolerance_rad=(
+                self.settings.continuous_settle_rotation_tolerance_rad
+            ),
         )
 
     def _continuous_commitment_metrics(self, chunk: Any) -> tuple[float, float]:
@@ -563,6 +620,204 @@ class Runner:
             - self._latest_observation_pose7[2]
         )
         return self._latest_delta_force_norm_n, upward_exit_m
+
+    @staticmethod
+    def _quaternion_angle_rad(first: np.ndarray, second: np.ndarray) -> float:
+        q1 = np.asarray(first, dtype=np.float64)
+        q2 = np.asarray(second, dtype=np.float64)
+        q1 = q1 / np.linalg.norm(q1)
+        q2 = q2 / np.linalg.norm(q2)
+        dot = abs(float(np.dot(q1, q2)))
+        return 2.0 * float(np.arccos(np.clip(dot, -1.0, 1.0)))
+
+    def _continuous_plan_time_scale(
+        self, chunk: Any
+    ) -> tuple[float, dict[str, float]]:
+        point_count = self.settings.continuous_commitment_points
+        period_s = float(chunk.action_period_s)
+        poses = (
+            np.asarray(chunk.reference_pose7[:point_count], dtype=np.float64),
+            np.asarray(chunk.virtual_pose7[:point_count], dtype=np.float64),
+        )
+        linear_velocities: list[np.ndarray] = []
+        angular_velocities: list[np.ndarray] = []
+        for pose7 in poses:
+            linear_velocities.append(np.diff(pose7[:, :3], axis=0) / period_s)
+            angular_velocities.append(
+                np.asarray(
+                    [
+                        self._quaternion_angle_rad(left, right) / period_s
+                        for left, right in zip(pose7[:-1, 3:], pose7[1:, 3:])
+                    ],
+                    dtype=np.float64,
+                )
+            )
+        linear_velocity = np.concatenate(linear_velocities, axis=0)
+        angular_velocity = np.concatenate(angular_velocities, axis=0)
+        max_linear_velocity = float(
+            np.max(np.linalg.norm(linear_velocity, axis=1), initial=0.0)
+        )
+        max_angular_velocity = float(np.max(angular_velocity, initial=0.0))
+        linear_acceleration = np.concatenate(
+            [np.diff(velocity, axis=0) / period_s for velocity in linear_velocities],
+            axis=0,
+        )
+        angular_acceleration = np.concatenate(
+            [np.diff(velocity) / period_s for velocity in angular_velocities],
+            axis=0,
+        )
+        max_linear_acceleration = float(
+            np.max(np.linalg.norm(linear_acceleration, axis=1), initial=0.0)
+        )
+        max_angular_acceleration = float(
+            np.max(np.abs(angular_acceleration), initial=0.0)
+        )
+        utilization = self.settings.continuous_tracking_speed_utilization
+        scale_components = {
+            "linear_velocity": max_linear_velocity
+            / (self.settings.max_linear_velocity_m_s * utilization),
+            "linear_acceleration": np.sqrt(
+                max_linear_acceleration
+                / (self.settings.max_linear_acceleration_m_s2 * utilization)
+            ),
+            "angular_velocity": max_angular_velocity
+            / (self.settings.max_angular_velocity_rad_s * utilization),
+            "angular_acceleration": np.sqrt(
+                max_angular_acceleration
+                / (self.settings.max_angular_acceleration_rad_s2 * utilization)
+            ),
+        }
+        required_scale = float(max(1.0, *scale_components.values()))
+        metrics = {
+            "max_linear_velocity_m_s": max_linear_velocity,
+            "max_linear_acceleration_m_s2": max_linear_acceleration,
+            "max_angular_velocity_rad_s": max_angular_velocity,
+            "max_angular_acceleration_rad_s2": max_angular_acceleration,
+            "required_time_scale": required_scale,
+        }
+        self._emit(
+            "action_plan_time_scaling",
+            request_id=chunk.request_id,
+            time_scale=required_scale,
+            scale_components=scale_components,
+            **metrics,
+        )
+        if required_scale > self.settings.continuous_max_time_scale:
+            self.safety.fault(
+                "committed action requires time scale "
+                f"{required_scale:.3f}, above configured maximum "
+                f"{self.settings.continuous_max_time_scale:.3f}"
+            )
+        return required_scale, metrics
+
+    def _terminal_target_pose(self, chunk: Any, current_pose7: np.ndarray) -> np.ndarray:
+        point = self.settings.continuous_commitment_points - 1
+        target = np.asarray(chunk.virtual_pose7[point], dtype=np.float64).copy()
+        if self.settings.orientation_source == "reference":
+            target[3:] = chunk.reference_pose7[point, 3:]
+        elif self.settings.orientation_source == "current":
+            target[3:] = current_pose7[3:]
+        return target
+
+    def _settle_committed_plan(self, chunk: Any, deadline_s: float) -> str:
+        final_point = self.settings.continuous_commitment_points - 1
+        state = self.hardware.read_state()
+        self._validate_robot_state(state)
+        self._record_state(state)
+        self._latch_chunk_pose(state.pose7)
+        target_pose7 = self._terminal_target_pose(chunk, state.pose7)
+        started_s = self.clock()
+        settle_deadline_s = min(
+            deadline_s, started_s + self.settings.continuous_settle_timeout_s
+        )
+        executor = ActionChunkExecutor(
+            chunk=chunk,
+            start_time_s=started_s,
+            execute_points=1,
+            inner_stiffness=self.safety.limits.inner_translation_stiffness_n_m,
+            orientation_source=self.settings.orientation_source,
+            start_point=final_point,
+            time_scale=max(
+                1.0,
+                (
+                    self.settings.continuous_settle_timeout_s
+                    + self.settings.control_period_s
+                )
+                / chunk.action_period_s,
+            ),
+        )
+        self._emit(
+            "action_plan_settle_started",
+            request_id=chunk.request_id,
+            point=final_point,
+            target_pose7=target_pose7,
+            timeout_s=self.settings.continuous_settle_timeout_s,
+        )
+        while True:
+            now = self.clock()
+            state = self.hardware.read_state()
+            self._validate_robot_state(state)
+            self._record_state(state)
+            reading = WrenchReading.from_raw(state.raw_wrench_tcp, self._baseline)
+            self.safety.validate_wrench(reading)
+            position_error_m = float(
+                np.linalg.norm(state.pose7[:3] - target_pose7[:3])
+            )
+            rotation_error_rad = self._quaternion_angle_rad(
+                state.pose7[3:], target_pose7[3:]
+            )
+            if (
+                position_error_m
+                <= self.settings.continuous_settle_position_tolerance_m
+                and rotation_error_rad
+                <= self.settings.continuous_settle_rotation_tolerance_rad
+            ):
+                self._emit(
+                    "action_plan_settle_complete",
+                    request_id=chunk.request_id,
+                    elapsed_s=now - started_s,
+                    position_error_m=position_error_m,
+                    rotation_error_rad=rotation_error_rad,
+                )
+                return "complete"
+            if now >= settle_deadline_s:
+                reason = (
+                    "runtime_limit"
+                    if now >= deadline_s
+                    else "settle_timeout"
+                )
+                self._emit(
+                    "action_plan_settle_stopped",
+                    request_id=chunk.request_id,
+                    reason=reason,
+                    elapsed_s=now - started_s,
+                    position_error_m=position_error_m,
+                    rotation_error_rad=rotation_error_rad,
+                )
+                return reason
+            command = executor.command_at(now, state.pose7, self.safety)
+            self.hardware.send_pose(command.applied_pose7)
+            self.completed_steps += 1
+            self._emit(
+                "command",
+                request_id=chunk.request_id,
+                step=self.completed_steps,
+                phase="terminal_settle",
+                plan_start_point=final_point,
+                execution_time_scale=executor.time_scale,
+                raw_wrench=reading.model_wrench,
+                delta_wrench=reading.delta_wrench,
+                predicted_stiffness=command.predicted_stiffness,
+                applied_stiffness=command.applied_stiffness,
+                reference_pose7=command.reference_pose7,
+                virtual_pose7=command.virtual_pose7,
+                equivalent_pose7=command.equivalent_pose7,
+                applied_pose7=command.applied_pose7,
+                position_error_m=position_error_m,
+                rotation_error_rad=rotation_error_rad,
+                safety_messages=command.safety_messages,
+            )
+            self.sleep(self.settings.control_period_s)
 
     def _emit_continuous_stop(self) -> None:
         if self._continuous_started_s is None or self._continuous_stop_emitted:
@@ -585,6 +840,7 @@ class Runner:
         plan = first_chunk
         plan_start_point = 0
         plan_committed = False
+        plan_time_scale = 1.0
         self._transition(DeploymentState.RUNNING, "continuous policy loop started")
         while self.clock() < deadline_s:
             if not plan_committed:
@@ -605,6 +861,9 @@ class Runner:
                     committed=plan_committed,
                 )
                 if plan_committed:
+                    plan_time_scale, time_scale_metrics = (
+                        self._continuous_plan_time_scale(plan)
+                    )
                     self._emit(
                         "action_plan_commitment_started",
                         request_id=plan.request_id,
@@ -613,14 +872,18 @@ class Runner:
                         ),
                         contact_force_norm_n=force_norm_n,
                         upward_exit_m=upward_exit_m,
+                        execution_time_scale=plan_time_scale,
+                        time_scale_metrics=time_scale_metrics,
                     )
             remaining_points = (
                 self.settings.continuous_commitment_points - plan_start_point
                 if plan_committed
                 else self.settings.continuous_execute_points
             )
-            point_count = min(
-                self.settings.continuous_execute_points, remaining_points
+            point_count = (
+                remaining_points
+                if plan_committed
+                else self.settings.continuous_execute_points
             )
             self._emit(
                 "chunk_start",
@@ -629,6 +892,10 @@ class Runner:
                 plan_start_point=plan_start_point,
                 selected_point_count=point_count,
                 plan_committed=plan_committed,
+                execution_time_scale=plan_time_scale,
+                effective_action_period_s=(
+                    plan.action_period_s * plan_time_scale
+                ),
                 cumulative_runtime_s=self.clock() - started_s,
             )
             for point in range(plan_start_point, plan_start_point + point_count):
@@ -646,6 +913,7 @@ class Runner:
                     execute_points=point_count,
                     start_point=plan_start_point,
                     deadline_s=deadline_s,
+                    time_scale=plan_time_scale,
                 )
                 command_count = 0
             else:
@@ -655,6 +923,10 @@ class Runner:
                     execute_points=point_count,
                     start_point=plan_start_point,
                     deadline_s=deadline_s,
+                    time_scale=plan_time_scale,
+                    phase=(
+                        "committed_plan" if plan_committed else "free_space"
+                    ),
                 )
                 command_count = self.completed_steps - before
             if not completed:
@@ -669,41 +941,51 @@ class Runner:
                 command_count=command_count,
                 inference_latency_s=plan.inference_latency_s,
                 action_period_s=plan.action_period_s,
+                execution_time_scale=plan_time_scale,
+                effective_action_period_s=(
+                    plan.action_period_s * plan_time_scale
+                ),
                 cumulative_runtime_s=self.clock() - started_s,
             )
-            if self.clock() >= deadline_s:
-                break
-            candidate = self._infer_action(next_request_id)
-            next_request_id += 1
-            next_plan_start = plan_start_point + point_count
-            if not plan_committed:
-                self._emit(
-                    "action_plan_replanned",
-                    previous_request_id=plan.request_id,
-                    request_id=candidate.request_id,
-                )
-                plan = candidate
-                plan_start_point = 0
-            elif next_plan_start >= self.settings.continuous_commitment_points:
+            if plan_committed:
                 self._emit(
                     "action_plan_commitment_completed",
                     request_id=plan.request_id,
                     completed_commitment_points=(
                         self.settings.continuous_commitment_points
                     ),
-                    next_request_id=candidate.request_id,
+                    execution_time_scale=plan_time_scale,
                 )
-                plan = candidate
-                plan_start_point = 0
-                plan_committed = False
-            else:
-                self._emit(
-                    "action_plan_candidate",
-                    request_id=candidate.request_id,
-                    active_request_id=plan.request_id,
-                    next_plan_start_point=next_plan_start,
-                )
-                plan_start_point = next_plan_start
+                if self.mode == "continuous-dry-run":
+                    self.stop_reason = "dry_run_commitment_complete"
+                    self._emit_continuous_stop()
+                    self._transition(DeploymentState.HOLD, self.stop_reason)
+                    return 0
+                settle_result = self._settle_committed_plan(plan, deadline_s)
+                if settle_result == "complete":
+                    self.stop_reason = "committed_plan_complete"
+                    result = 0
+                elif settle_result == "runtime_limit":
+                    self.stop_reason = "runtime_limit_reached"
+                    result = 0
+                else:
+                    self.stop_reason = "commitment_settle_timeout"
+                    result = 1
+                self._emit_continuous_stop()
+                self._transition(DeploymentState.HOLD, self.stop_reason)
+                return result
+            if self.clock() >= deadline_s:
+                break
+            candidate = self._infer_action(next_request_id)
+            next_request_id += 1
+            self._emit(
+                "action_plan_replanned",
+                previous_request_id=plan.request_id,
+                request_id=candidate.request_id,
+            )
+            plan = candidate
+            plan_start_point = 0
+            plan_time_scale = 1.0
         self.stop_reason = "runtime_limit_reached"
         self._emit_continuous_stop()
         self._transition(DeploymentState.HOLD, self.stop_reason)
@@ -998,6 +1280,33 @@ def main(argv: list[str] | None = None) -> int:
             continuous_min_upward_exit_m=float(
                 config["continuous"]["min_upward_exit_m"]
             ),
+            continuous_tracking_speed_utilization=float(
+                config["continuous"]["tracking_speed_utilization"]
+            ),
+            continuous_max_time_scale=float(
+                config["continuous"]["max_time_scale"]
+            ),
+            continuous_settle_timeout_s=float(
+                config["continuous"]["settle_timeout_s"]
+            ),
+            continuous_settle_position_tolerance_m=float(
+                config["continuous"]["settle_position_tolerance_m"]
+            ),
+            continuous_settle_rotation_tolerance_rad=float(
+                config["continuous"]["settle_rotation_tolerance_rad"]
+            ),
+            max_linear_velocity_m_s=float(
+                config["execution"]["max_linear_velocity_m_s"]
+            ),
+            max_linear_acceleration_m_s2=float(
+                config["execution"]["max_linear_acceleration_m_s2"]
+            ),
+            max_angular_velocity_rad_s=float(
+                config["execution"]["max_angular_velocity_rad_s"]
+            ),
+            max_angular_acceleration_rad_s2=float(
+                config["execution"]["max_angular_acceleration_rad_s2"]
+            ),
             max_continuous_runtime_s=float(config["continuous"]["max_runtime_s"]),
             orientation_source=str(config["execution"]["orientation_source"]),
             expected_camera_view=str(camera["view"]),
@@ -1019,6 +1328,8 @@ def main(argv: list[str] | None = None) -> int:
                     event.get("chunk_index"),
                     event.get("inference_latency_s"),
                     event.get("action_period_s"),
+                    event.get("execution_time_scale"),
+                    event.get("effective_action_period_s"),
                     event.get("selected_point_count"),
                     event.get("command_count"),
                     event.get("cumulative_runtime_s"),
@@ -1028,6 +1339,8 @@ def main(argv: list[str] | None = None) -> int:
                     event.get("request_id"),
                     "",
                     event.get("inference_latency_s"),
+                    event.get("action_period_s"),
+                    1.0,
                     event.get("action_period_s"),
                     settings.execute_points,
                     "",

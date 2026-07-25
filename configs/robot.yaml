@@ -55,6 +55,11 @@ continuous:
   commitment_points: 16
   contact_force_threshold_n: 5.0
   min_upward_exit_m: 0.03
+  tracking_speed_utilization: 0.8
+  max_time_scale: 6.0
+  settle_timeout_s: 8.0
+  settle_position_tolerance_m: 0.01
+  settle_rotation_tolerance_rad: 0.10
   max_runtime_s: 120.0
   max_equivalent_target_distance_m: 0.20
   workspace_min_xyz_m: [0.55, -0.14, 0.04]

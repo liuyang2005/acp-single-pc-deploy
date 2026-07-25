@@ -74,6 +74,40 @@ def test_executor_can_continue_from_a_later_action_point() -> None:
     assert second.virtual_pose7[0] == pytest.approx(0.013)
 
 
+def test_executor_time_scale_slows_interpolation_and_extends_window() -> None:
+    chunk = make_action()
+    chunk.reference_pose7[:, 0] = np.arange(16) * 0.001
+    chunk.virtual_pose7[:, 0] = np.arange(16) * 0.001
+    supervisor = SafetySupervisor(SafetyLimits.defaults())
+    current = np.array([0, 0, 0, 1, 0, 0, 0], dtype=float)
+    supervisor.latch_start_pose(current)
+    executor = ActionChunkExecutor(
+        chunk,
+        start_time_s=0.0,
+        execute_points=2,
+        inner_stiffness=5000.0,
+        time_scale=2.0,
+    )
+
+    second = executor.command_at(2.0 * chunk.action_period_s, current, supervisor)
+
+    assert second.virtual_pose7[0] == pytest.approx(0.001)
+    assert executor.action_period_s == pytest.approx(2.0 * chunk.action_period_s)
+    assert executor.end_time_s == pytest.approx(4.0 * chunk.action_period_s)
+
+
+@pytest.mark.parametrize("time_scale", (0.5, np.inf, np.nan))
+def test_executor_rejects_invalid_time_scale(time_scale) -> None:
+    with pytest.raises(ValueError, match="time_scale"):
+        ActionChunkExecutor(
+            make_action(),
+            0.0,
+            execute_points=2,
+            inner_stiffness=5000.0,
+            time_scale=time_scale,
+        )
+
+
 def test_executor_rejects_a_window_past_the_action_horizon() -> None:
     with pytest.raises(ValueError, match="execution window"):
         ActionChunkExecutor(

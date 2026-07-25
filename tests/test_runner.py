@@ -7,6 +7,7 @@ from acp_single_pc_deploy.robot.hardware import HOME_JOINTS_DEG
 from acp_single_pc_deploy.robot.client import InferenceTimeout
 from acp_single_pc_deploy.robot.runner import Runner, RunnerSettings
 from acp_single_pc_deploy.robot.safety import DeploymentState
+from acp_single_pc_deploy.tests.test_common import make_action
 
 
 def continuous_settings(**overrides) -> RunnerSettings:
@@ -157,6 +158,14 @@ def test_continuous_commits_contact_plan_with_a_clear_upward_exit(
             continuous_execute_points=2,
             continuous_commitment_points=4,
             max_continuous_runtime_s=0.1,
+            continuous_tracking_speed_utilization=1.0,
+            continuous_max_time_scale=1.0,
+            continuous_settle_position_tolerance_m=1.0,
+            continuous_settle_rotation_tolerance_rad=1.0,
+            max_linear_velocity_m_s=100.0,
+            max_linear_acceleration_m_s2=100000.0,
+            max_angular_velocity_rad_s=100.0,
+            max_angular_acceleration_rad_s2=100000.0,
         ),
     )
 
@@ -176,6 +185,99 @@ def test_continuous_commits_contact_plan_with_a_clear_upward_exit(
     assert committed[0]["request_id"] == 0
     assert committed[0]["contact_force_norm_n"] == 6.0
     assert committed[0]["upward_exit_m"] == pytest.approx(0.04)
+    assert fake_components.observed_request_ids == [0]
+    assert runner.stop_reason == "committed_plan_complete"
+    committed_starts = [
+        e
+        for e in fake_components.events
+        if e["type"] == "chunk_start" and e["plan_committed"] is True
+    ]
+    assert len(committed_starts) == 1
+    assert committed_starts[0]["selected_point_count"] == 4
+    assert any(
+        e["type"] == "action_plan_settle_complete"
+        for e in fake_components.events
+    )
+
+
+def test_continuous_plan_time_scale_matches_configured_tracking_speed(
+    fake_components,
+) -> None:
+    settings = continuous_settings(
+        continuous_execute_points=2,
+        continuous_commitment_points=4,
+        continuous_tracking_speed_utilization=0.5,
+        continuous_max_time_scale=6.0,
+        max_linear_velocity_m_s=0.02,
+        max_linear_acceleration_m_s2=100.0,
+    )
+    runner = Runner.for_test("continuous", fake_components, settings=settings)
+    chunk = make_action(request_id=7)
+    positions = np.arange(16, dtype=np.float64) * 0.003
+    chunk.reference_pose7[:, 0] = positions
+    chunk.virtual_pose7[:, 0] = positions
+
+    time_scale, metrics = runner._continuous_plan_time_scale(chunk)
+
+    assert metrics["max_linear_velocity_m_s"] == pytest.approx(0.02)
+    assert time_scale == pytest.approx(2.0)
+    event = next(
+        e for e in fake_components.events if e["type"] == "action_plan_time_scaling"
+    )
+    assert event["request_id"] == 7
+    assert event["time_scale"] == pytest.approx(2.0)
+
+
+def test_continuous_terminal_settle_timeout_holds_without_replanning(
+    fake_components,
+) -> None:
+    original_observe = fake_components.observe
+    original_infer = fake_components.client.infer
+
+    def contact_observe(request_id):
+        packet = original_observe(request_id)
+        packet.wrench[:, 0] = 6.0
+        return packet
+
+    def upward_infer(packet):
+        chunk = original_infer(packet)
+        chunk.virtual_pose7[3, 2] = packet.pose7[-1, 2] + 0.04
+        return chunk
+
+    def record_without_following(pose7):
+        fake_components.hardware.policy_pose_commands.append(
+            np.asarray(pose7, dtype=np.float64).copy()
+        )
+
+    fake_components.observe = contact_observe
+    fake_components.client.infer = upward_infer
+    fake_components.hardware.send_pose = record_without_following
+    runner = Runner.for_test(
+        "continuous",
+        fake_components,
+        settings=continuous_settings(
+            continuous_execute_points=2,
+            continuous_commitment_points=4,
+            continuous_tracking_speed_utilization=1.0,
+            continuous_max_time_scale=1.0,
+            continuous_settle_timeout_s=0.02,
+            continuous_settle_position_tolerance_m=0.001,
+            max_continuous_runtime_s=0.2,
+            max_linear_velocity_m_s=100.0,
+            max_linear_acceleration_m_s2=100000.0,
+            max_angular_velocity_rad_s=100.0,
+            max_angular_acceleration_rad_s2=100000.0,
+        ),
+    )
+
+    assert runner.run_once() == 1
+    assert runner.stop_reason == "commitment_settle_timeout"
+    assert runner.safety.state is DeploymentState.HOLD
+    assert fake_components.observed_request_ids == [0]
+    stopped = next(
+        e for e in fake_components.events if e["type"] == "action_plan_settle_stopped"
+    )
+    assert stopped["reason"] == "settle_timeout"
 
 
 def test_continuous_contact_without_upward_exit_keeps_replanning(

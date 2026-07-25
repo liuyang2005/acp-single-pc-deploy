@@ -63,6 +63,11 @@ def test_fixed_inference_and_robot_configs() -> None:
     assert robot["continuous"]["commitment_points"] == 16
     assert robot["continuous"]["contact_force_threshold_n"] == 5.0
     assert robot["continuous"]["min_upward_exit_m"] == 0.03
+    assert robot["continuous"]["tracking_speed_utilization"] == 0.8
+    assert robot["continuous"]["max_time_scale"] == 6.0
+    assert robot["continuous"]["settle_timeout_s"] == 8.0
+    assert robot["continuous"]["settle_position_tolerance_m"] == 0.01
+    assert robot["continuous"]["settle_rotation_tolerance_rad"] == 0.10
     assert robot["acquisition"]["pose_sample_period_s"] == 0.01007
     assert robot["acquisition"]["wrench_sample_period_s"] == 0.005263
     assert robot["continuous"]["max_runtime_s"] == 120.0
@@ -112,6 +117,9 @@ def test_runner_settings_reject_commitment_shorter_than_execution_window() -> No
     (
         "continuous_contact_force_threshold_n",
         "continuous_min_upward_exit_m",
+        "continuous_settle_timeout_s",
+        "continuous_settle_position_tolerance_m",
+        "continuous_settle_rotation_tolerance_rad",
     ),
 )
 def test_runner_settings_reject_nonpositive_commitment_thresholds(field) -> None:

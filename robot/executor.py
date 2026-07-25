@@ -63,6 +63,7 @@ class ActionChunkExecutor:
         inner_stiffness: float,
         orientation_source: str = "reference",
         start_point: int = 0,
+        time_scale: float = 1.0,
     ) -> None:
         chunk.validate(EXPECTED_CONTRACT)
         if not 1 <= execute_points <= EXPECTED_CONTRACT.action_horizon:
@@ -75,6 +76,8 @@ class ActionChunkExecutor:
             raise ValueError("start_time_s must be finite")
         if not np.isfinite(inner_stiffness) or inner_stiffness <= 0.0:
             raise ValueError("inner_stiffness must be finite and positive")
+        if not np.isfinite(time_scale) or time_scale < 1.0:
+            raise ValueError("time_scale must be finite and at least 1")
         if orientation_source not in {"reference", "virtual", "current"}:
             raise ValueError("orientation_source must be reference, virtual, or current")
         self.chunk = chunk
@@ -83,7 +86,9 @@ class ActionChunkExecutor:
         self.start_point = start_point
         self.inner_stiffness = float(inner_stiffness)
         self.orientation_source = orientation_source
-        self.end_time_s = self.start_time_s + execute_points * chunk.action_period_s
+        self.time_scale = float(time_scale)
+        self.action_period_s = chunk.action_period_s * self.time_scale
+        self.end_time_s = self.start_time_s + execute_points * self.action_period_s
 
     @property
     def request_id(self) -> int:
@@ -103,7 +108,7 @@ class ActionChunkExecutor:
             raise RuntimeError("action execution has not started")
         if self.expired(now):
             raise RuntimeError("action execution window expired")
-        offset = (now - self.start_time_s) / self.chunk.action_period_s
+        offset = (now - self.start_time_s) / self.action_period_s
         local_left = min(int(np.floor(offset)), self.execute_points - 1)
         local_right = min(local_left + 1, self.execute_points - 1)
         left = self.start_point + local_left
